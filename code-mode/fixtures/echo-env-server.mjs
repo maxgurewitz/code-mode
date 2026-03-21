@@ -7,29 +7,52 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-server.tool("get_env", { name: z.string() }, async ({ name }) => {
-  const value = process.env[name];
-  return {
-    content: [
-      {
-        type: "text",
-        text: value !== undefined ? value : `<unset: ${name}>`,
-      },
-    ],
-  };
-});
+server.registerTool(
+  "get_env",
+  {
+    inputSchema: { name: z.string() },
+    outputSchema: { value: z.string() },
+  },
+  async ({ name }) => {
+    const structuredContent = {
+      value: process.env[name] !== undefined ? process.env[name] : `<unset: ${name}>`,
+    };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(structuredContent),
+        },
+      ],
+      structuredContent,
+    };
+  }
+);
 
-server.tool("get_arg", { index: z.number().int().nonnegative() }, async ({ index }) => {
-  const value = process.argv[2 + index];
-  return {
-    content: [
-      {
-        type: "text",
-        text: value !== undefined ? value : `<unset-arg: ${index}>`,
-      },
-    ],
-  };
-});
+server.registerTool(
+  "get_arg",
+  {
+    inputSchema: { index: z.number().int().nonnegative() },
+    outputSchema: { value: z.string() },
+  },
+  async ({ index }) => {
+    const structuredContent = {
+      value:
+        process.argv[2 + index] !== undefined
+          ? process.argv[2 + index]
+          : `<unset-arg: ${index}>`,
+    };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(structuredContent),
+        },
+      ],
+      structuredContent,
+    };
+  }
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

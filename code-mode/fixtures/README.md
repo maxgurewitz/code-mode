@@ -29,6 +29,7 @@ After generating the SDK and installing the fixture dependencies:
 ```sh
 cd code-mode/fixtures
 bun install
+bun run typecheck
 bun run test-sdk.ts
 bun run test-env.ts
 ```

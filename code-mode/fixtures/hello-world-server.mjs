@@ -7,16 +7,25 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-server.tool("echo", { message: z.string() }, async ({ message }) => {
-  return {
-    content: [
-      {
-        type: "text",
-        text: `You said: ${message}`,
-      },
-    ],
-  };
-});
+server.registerTool(
+  "echo",
+  {
+    inputSchema: { message: z.string() },
+    outputSchema: { text: z.string() },
+  },
+  async ({ message }) => {
+    const structuredContent = { text: `You said: ${message}` };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(structuredContent),
+        },
+      ],
+      structuredContent,
+    };
+  }
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
