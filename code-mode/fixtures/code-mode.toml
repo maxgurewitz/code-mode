@@ -1,0 +1,5 @@
+base_dir = ".tmp/.code-mode"
+
+[servers.hello-world]
+command = "npx"
+args = ["mcp-hello-world"]

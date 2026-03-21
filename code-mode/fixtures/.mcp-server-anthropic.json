@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "server-anthropic": {
+      "type": "stdio",
+      "command": "cargo",
+      "args": ["run", "-p", "mcp-server-anthropic"]
+    }
+  }
+}

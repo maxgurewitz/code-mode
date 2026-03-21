@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hello-world": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["mcp-hello-world"]
+    }
+  }
+}

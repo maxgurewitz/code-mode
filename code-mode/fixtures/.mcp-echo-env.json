@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "echo-env": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["code-mode/fixtures/echo-env-server.mjs"],
+      "env": {
+        "TEST_SECRET": "from-mcp-json"
+      }
+    }
+  }
+}

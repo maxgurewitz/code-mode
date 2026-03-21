@@ -1,0 +1,2 @@
+[mcp_servers.tempo]
+url = "http://127.0.0.1:3200/api/mcp"
