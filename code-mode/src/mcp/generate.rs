@@ -123,6 +123,15 @@ fn to_camel_case(s: &str) -> String {
     result
 }
 
+fn instructions_markdown(server_name: &str, instructions: Option<&str>) -> Option<String> {
+    let instructions = instructions?;
+    if instructions.trim().is_empty() {
+        return None;
+    }
+
+    Some(format!("# {server_name}\n\n{instructions}\n"))
+}
+
 /// Generate the base directory structure and TypeScript SDK.
 fn generate(base_dir: &Path, servers: &[(String, DiscoveryResult)]) -> Result<()> {
     let sdk_dir = base_dir.join("sdk");
@@ -146,8 +155,7 @@ fn generate(base_dir: &Path, servers: &[(String, DiscoveryResult)]) -> Result<()
     println!("  wrote package.json");
 
     // Write client.ts — embed the absolute path to the code-mode binary
-    let exe_path =
-        std::env::current_exe().context("failed to determine code-mode binary path")?;
+    let exe_path = std::env::current_exe().context("failed to determine code-mode binary path")?;
     let exe_str = exe_path.display().to_string().replace('\\', "\\\\");
 
     let client_ts = format!(
@@ -196,19 +204,28 @@ export async function closeAll(): Promise<void> {{
     for (server_name, discovery) in servers {
         let server_dir = sdk_dir.join(server_name);
         std::fs::create_dir_all(&server_dir).with_context(|| {
-            format!("failed to create server directory: {}", server_dir.display())
+            format!(
+                "failed to create server directory: {}",
+                server_dir.display()
+            )
         })?;
 
-        // Write INSTRUCTIONS.md
-        let instructions = discovery
-            .instructions
-            .as_deref()
-            .unwrap_or("No instructions provided by this server.");
-        std::fs::write(
-            server_dir.join("INSTRUCTIONS.md"),
-            format!("# {server_name}\n\n{instructions}\n"),
-        )?;
-        println!("  wrote sdk/{server_name}/INSTRUCTIONS.md");
+        // Write INSTRUCTIONS.md only when the server actually provides instructions.
+        let instructions_path = server_dir.join("INSTRUCTIONS.md");
+        if let Some(instructions) =
+            instructions_markdown(server_name, discovery.instructions.as_deref())
+        {
+            std::fs::write(&instructions_path, instructions)?;
+            println!("  wrote sdk/{server_name}/INSTRUCTIONS.md");
+        } else if instructions_path.exists() {
+            std::fs::remove_file(&instructions_path).with_context(|| {
+                format!(
+                    "failed to remove stale instructions file: {}",
+                    instructions_path.display()
+                )
+            })?;
+            println!("  removed sdk/{server_name}/INSTRUCTIONS.md");
+        }
 
         // Write one file per tool
         let mut server_exports = Vec::new();
@@ -250,9 +267,7 @@ export async function closeAll(): Promise<void> {{
             std::fs::write(server_dir.join(&file_name), &tool_code)?;
             println!("  wrote sdk/{server_name}/{file_name}");
 
-            server_exports.push(format!(
-                "export {{ {fn_name} }} from \"./{tool_name}.js\";"
-            ));
+            server_exports.push(format!("export {{ {fn_name} }} from \"./{tool_name}.js\";"));
 
             manifest_tools.push(DiscoveredTool {
                 server: server_name.clone(),
@@ -369,4 +384,86 @@ pub async fn execute(config: &Config, base_dir: Option<&Path>) -> Result<()> {
 
     println!("SDK generation complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after UNIX_EPOCH")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "code-mode-generate-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn server(name: &str, instructions: Option<&str>) -> (String, DiscoveryResult) {
+        (
+            name.to_string(),
+            DiscoveryResult {
+                instructions: instructions.map(str::to_owned),
+                tools: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn instructions_markdown_ignores_missing_and_blank_instructions() {
+        assert_eq!(instructions_markdown("demo", None), None);
+        assert_eq!(instructions_markdown("demo", Some("")), None);
+        assert_eq!(instructions_markdown("demo", Some("   \n\t  ")), None);
+    }
+
+    #[test]
+    fn generate_writes_instructions_when_present() -> Result<()> {
+        let temp_dir = TestDir::new("writes-instructions");
+
+        generate(
+            temp_dir.path(),
+            &[server("demo", Some("Use this server carefully."))],
+        )?;
+
+        let instructions_path = temp_dir.path().join("sdk/demo/INSTRUCTIONS.md");
+        let content = std::fs::read_to_string(instructions_path)?;
+        assert_eq!(content, "# demo\n\nUse this server carefully.\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn generate_skips_blank_instructions_and_removes_stale_file() -> Result<()> {
+        let temp_dir = TestDir::new("removes-stale-instructions");
+        let instructions_path = temp_dir.path().join("sdk/demo/INSTRUCTIONS.md");
+
+        std::fs::create_dir_all(instructions_path.parent().expect("path has parent"))?;
+        std::fs::write(&instructions_path, "stale instructions")?;
+
+        generate(temp_dir.path(), &[server("demo", Some("   \n"))])?;
+
+        assert!(!instructions_path.exists());
+
+        Ok(())
+    }
 }
