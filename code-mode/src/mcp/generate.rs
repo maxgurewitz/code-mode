@@ -31,7 +31,6 @@ async fn discover_server(name: &str, entry: &ServerEntry) -> Result<DiscoveryRes
         .command
         .as_deref()
         .context("stdio server missing command")?;
-
     let transport =
         TokioChildProcess::new(tokio::process::Command::new(command).configure(|cmd| {
             cmd.args(&entry.args);
@@ -169,6 +168,11 @@ export async function getClient(): Promise<Client> {{
   const transport = new StdioClientTransport({{
     command: "{}",
     args: ["mcp", "serve"],
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
   }});
   client = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
   await client.connect(transport);

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -76,8 +77,6 @@ fn validate_entry(name: &str, entry: &ServerEntry) -> Result<()> {
     Ok(())
 }
 
-use std::path::Path;
-
 fn load_toml(path: &Path, config: &mut Config) -> Result<()> {
     if path.exists() {
         let content = std::fs::read_to_string(path)
@@ -90,6 +89,157 @@ fn load_toml(path: &Path, config: &mut Config) -> Result<()> {
         config.servers.extend(cfg.servers);
     }
     Ok(())
+}
+
+fn is_var_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_var_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn interpolate_string(input: &str, variables: &HashMap<String, String>) -> String {
+    let mut output = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch != '$' {
+            output.push(ch);
+            index += 1;
+            continue;
+        }
+
+        let Some(next) = chars.get(index + 1).copied() else {
+            output.push('$');
+            index += 1;
+            continue;
+        };
+
+        if next == '$' {
+            output.push('$');
+            index += 2;
+            continue;
+        }
+
+        if next == '{' {
+            let mut cursor = index + 2;
+            let mut name = String::new();
+            while cursor < chars.len() && chars[cursor] != '}' {
+                name.push(chars[cursor]);
+                cursor += 1;
+            }
+
+            if cursor < chars.len()
+                && !name.is_empty()
+                && is_var_start(name.chars().next().unwrap())
+                && name.chars().all(is_var_continue)
+            {
+                output.push_str(variables.get(&name).map(String::as_str).unwrap_or_default());
+                index = cursor + 1;
+                continue;
+            }
+
+            output.push('$');
+            output.push('{');
+            output.push_str(&name);
+            if cursor < chars.len() {
+                output.push('}');
+                index = cursor + 1;
+            } else {
+                index = cursor;
+            }
+            continue;
+        }
+
+        if is_var_start(next) {
+            let mut cursor = index + 1;
+            let mut name = String::new();
+            while cursor < chars.len() && is_var_continue(chars[cursor]) {
+                name.push(chars[cursor]);
+                cursor += 1;
+            }
+
+            output.push_str(variables.get(&name).map(String::as_str).unwrap_or_default());
+            index = cursor;
+            continue;
+        }
+
+        output.push('$');
+        index += 1;
+    }
+
+    output
+}
+
+fn string_needs_interpolation(input: &str) -> bool {
+    input.contains('$')
+}
+
+fn config_needs_interpolation(config: &Config) -> bool {
+    config
+        .base_dir
+        .as_ref()
+        .map(|path| string_needs_interpolation(&path.to_string_lossy()))
+        .unwrap_or(false)
+        || config.servers.values().any(|entry| {
+            entry
+                .command
+                .as_deref()
+                .map(string_needs_interpolation)
+                .unwrap_or(false)
+                || entry.args.iter().any(|arg| string_needs_interpolation(arg))
+                || entry
+                    .env
+                    .values()
+                    .any(|value| string_needs_interpolation(value))
+                || entry
+                    .url
+                    .as_deref()
+                    .map(string_needs_interpolation)
+                    .unwrap_or(false)
+                || entry
+                    .headers
+                    .values()
+                    .any(|value| string_needs_interpolation(value))
+        })
+}
+
+fn interpolate_config(config: &mut Config, variables: &HashMap<String, String>) {
+    if let Some(base_dir) = &config.base_dir {
+        config.base_dir = Some(PathBuf::from(interpolate_string(
+            &base_dir.to_string_lossy(),
+            variables,
+        )));
+    }
+
+    for entry in config.servers.values_mut() {
+        entry.command = entry
+            .command
+            .as_ref()
+            .map(|command| interpolate_string(command, variables));
+        entry.args = entry
+            .args
+            .iter()
+            .map(|arg| interpolate_string(arg, variables))
+            .collect();
+        entry.env = entry
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), interpolate_string(value, variables)))
+            .collect();
+        entry.url = entry
+            .url
+            .as_ref()
+            .map(|url| interpolate_string(url, variables));
+        entry.headers = entry
+            .headers
+            .iter()
+            .map(|(key, value)| (key.clone(), interpolate_string(value, variables)))
+            .collect();
+    }
 }
 
 /// Load and merge config. When `config_path` is provided, only that file is
@@ -114,9 +264,111 @@ pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
         load_toml(&local_path, &mut config)?;
     }
 
+    if config_needs_interpolation(&config) {
+        let variables: HashMap<String, String> = std::env::vars().collect();
+        interpolate_config(&mut config, &variables);
+    }
+
     for (name, entry) in &config.servers {
         validate_entry(name, entry)?;
     }
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Config, ServerEntry, config_needs_interpolation, interpolate_config, interpolate_string,
+    };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn test_entry() -> ServerEntry {
+        ServerEntry {
+            transport: "stdio".into(),
+            command: Some("$CMD".into()),
+            args: vec![
+                "$ARG".into(),
+                "${BRACED}".into(),
+                "$$DOLLAR".into(),
+                "prefix-$ARG-suffix".into(),
+                "$(not-a-var)".into(),
+            ],
+            env: HashMap::from([
+                ("FIRST".into(), "$ENV_ONE".into()),
+                ("SECOND".into(), "${ENV_TWO}".into()),
+            ]),
+            url: Some("https://example.com/$ARG".into()),
+            headers: HashMap::from([("Authorization".into(), "Bearer $TOKEN".into())]),
+        }
+    }
+
+    #[test]
+    fn interpolates_supported_env_variable_patterns() {
+        let variables = HashMap::from([
+            ("NAME".into(), "world".into()),
+            ("PATH_SEGMENT".into(), "bin".into()),
+        ]);
+
+        assert_eq!(
+            interpolate_string("hello $NAME/${PATH_SEGMENT}", &variables),
+            "hello world/bin"
+        );
+    }
+
+    #[test]
+    fn leaves_unknown_or_unsupported_patterns_safe() {
+        let variables = HashMap::from([("KNOWN".into(), "value".into())]);
+
+        assert_eq!(interpolate_string("$$KNOWN", &variables), "$KNOWN");
+        assert_eq!(interpolate_string("$(date)", &variables), "$(date)");
+        assert_eq!(
+            interpolate_string("${NOT-VALID}", &variables),
+            "${NOT-VALID}"
+        );
+        assert_eq!(interpolate_string("$UNKNOWN", &variables), "");
+    }
+
+    #[test]
+    fn interpolates_config_fields_used_by_mcp_servers() {
+        let mut config = Config {
+            base_dir: Some(PathBuf::from("$BASE_DIR")),
+            servers: HashMap::from([("fixture".into(), test_entry())]),
+        };
+
+        let variables = HashMap::from([
+            ("BASE_DIR".into(), ".tmp/.code-mode".into()),
+            ("CMD".into(), "node".into()),
+            ("ARG".into(), "script.mjs".into()),
+            ("BRACED".into(), "--flag".into()),
+            ("ENV_ONE".into(), "secret".into()),
+            ("ENV_TWO".into(), "another".into()),
+            ("TOKEN".into(), "abc123".into()),
+        ]);
+
+        assert!(config_needs_interpolation(&config));
+        interpolate_config(&mut config, &variables);
+
+        assert_eq!(config.base_dir, Some(PathBuf::from(".tmp/.code-mode")));
+        let entry = config.servers.get("fixture").unwrap();
+        assert_eq!(entry.command.as_deref(), Some("node"));
+        assert_eq!(
+            entry.args,
+            vec![
+                "script.mjs",
+                "--flag",
+                "$DOLLAR",
+                "prefix-script.mjs-suffix",
+                "$(not-a-var)",
+            ]
+        );
+        assert_eq!(entry.env.get("FIRST").map(String::as_str), Some("secret"));
+        assert_eq!(entry.env.get("SECOND").map(String::as_str), Some("another"));
+        assert_eq!(
+            entry.headers.get("Authorization").map(String::as_str),
+            Some("Bearer abc123")
+        );
+        assert_eq!(entry.url.as_deref(), Some("https://example.com/script.mjs"));
+    }
 }
