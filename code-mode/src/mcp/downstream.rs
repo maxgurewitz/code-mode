@@ -59,14 +59,12 @@ impl DownstreamManager {
             .with_context(|| format!("no downstream server configured: {server_name}"))?;
 
         let command = entry.command.as_deref().unwrap();
-
-        let transport = TokioChildProcess::new(
-            tokio::process::Command::new(command).configure(|cmd| {
+        let transport =
+            TokioChildProcess::new(tokio::process::Command::new(command).configure(|cmd| {
                 cmd.args(&entry.args);
                 cmd.envs(&entry.env);
-            }),
-        )
-        .with_context(|| format!("failed to spawn downstream server: {server_name}"))?;
+            }))
+            .with_context(|| format!("failed to spawn downstream server: {server_name}"))?;
 
         let service = ()
             .serve(transport)

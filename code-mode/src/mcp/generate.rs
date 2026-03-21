@@ -31,7 +31,6 @@ async fn discover_server(name: &str, entry: &ServerEntry) -> Result<DiscoveryRes
         .command
         .as_deref()
         .context("stdio server missing command")?;
-
     let transport =
         TokioChildProcess::new(tokio::process::Command::new(command).configure(|cmd| {
             cmd.args(&entry.args);
@@ -146,8 +145,7 @@ fn generate(base_dir: &Path, servers: &[(String, DiscoveryResult)]) -> Result<()
     println!("  wrote package.json");
 
     // Write client.ts — embed the absolute path to the code-mode binary
-    let exe_path =
-        std::env::current_exe().context("failed to determine code-mode binary path")?;
+    let exe_path = std::env::current_exe().context("failed to determine code-mode binary path")?;
     let exe_str = exe_path.display().to_string().replace('\\', "\\\\");
 
     let client_ts = format!(
@@ -161,6 +159,11 @@ export async function getClient(): Promise<Client> {{
   const transport = new StdioClientTransport({{
     command: "{}",
     args: ["mcp", "serve"],
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
   }});
   client = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
   await client.connect(transport);
@@ -196,7 +199,10 @@ export async function closeAll(): Promise<void> {{
     for (server_name, discovery) in servers {
         let server_dir = sdk_dir.join(server_name);
         std::fs::create_dir_all(&server_dir).with_context(|| {
-            format!("failed to create server directory: {}", server_dir.display())
+            format!(
+                "failed to create server directory: {}",
+                server_dir.display()
+            )
         })?;
 
         // Write INSTRUCTIONS.md
@@ -250,9 +256,7 @@ export async function closeAll(): Promise<void> {{
             std::fs::write(server_dir.join(&file_name), &tool_code)?;
             println!("  wrote sdk/{server_name}/{file_name}");
 
-            server_exports.push(format!(
-                "export {{ {fn_name} }} from \"./{tool_name}.js\";"
-            ));
+            server_exports.push(format!("export {{ {fn_name} }} from \"./{tool_name}.js\";"));
 
             manifest_tools.push(DiscoveredTool {
                 server: server_name.clone(),

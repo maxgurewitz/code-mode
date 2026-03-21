@@ -5,4 +5,4 @@ target/
 .code-mode/
 .workspace-tools/node_modules/
 .workspace-tools/sdk/node_modules/
-.code-mode/fixtures/node_modules/
+code-mode/fixtures/node_modules/

@@ -19,5 +19,17 @@ server.tool("get_env", { name: z.string() }, async ({ name }) => {
   };
 });
 
+server.tool("get_arg", { index: z.number().int().nonnegative() }, async ({ index }) => {
+  const value = process.argv[2 + index];
+  return {
+    content: [
+      {
+        type: "text",
+        text: value !== undefined ? value : `<unset-arg: ${index}>`,
+      },
+    ],
+  };
+});
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
