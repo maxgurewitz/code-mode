@@ -12,7 +12,7 @@ This project is a reproduction of the "serverside code mode" pattern as initiall
 `code-mode` reads configuration from TOML.
 
 - If you pass `--config /path/to/code-mode.toml`, only that file is used.
-- Otherwise `code-mode` merges `~/.config/code-mode/code-mode.toml` with `./code-mode.toml`.
+- Otherwise `code-mode` merges `~/.config/code-mode/code-mode.toml` with the nearest ancestor `code-mode.toml` discovered from the current directory.
 - Local config wins over global config when the same top-level keys or server names are defined in both places.
 
 The top-level schema is:

@@ -91,6 +91,29 @@ fn load_toml(path: &Path, config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+fn empty_config() -> Config {
+    Config {
+        base_dir: None,
+        servers: HashMap::new(),
+    }
+}
+
+fn find_local_config_path(start_dir: &Path) -> Option<PathBuf> {
+    start_dir
+        .ancestors()
+        .map(|dir| dir.join("code-mode.toml"))
+        .find(|path| path.is_file())
+}
+
+fn load_default_config(start_dir: &Path, global_path: &Path) -> Result<Config> {
+    let mut config = empty_config();
+    load_toml(global_path, &mut config)?;
+    if let Some(local_path) = find_local_config_path(start_dir) {
+        load_toml(&local_path, &mut config)?;
+    }
+    Ok(config)
+}
+
 fn is_var_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()
 }
@@ -244,25 +267,18 @@ fn interpolate_config(config: &mut Config, variables: &HashMap<String, String>) 
 
 /// Load and merge config. When `config_path` is provided, only that file is
 /// used. Otherwise merges `~/.config/code-mode/code-mode.toml` (global) with
-/// `./code-mode.toml` (local), local overrides global.
+/// the nearest ancestor `code-mode.toml` from the current directory, with the
+/// local config overriding global settings.
 pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
-    let mut config = Config {
-        base_dir: None,
-        servers: HashMap::new(),
-    };
-
-    if let Some(path) = config_path {
+    let mut config = if let Some(path) = config_path {
         anyhow::ensure!(path.exists(), "config file not found: {}", path.display());
+        let mut config = empty_config();
         load_toml(path, &mut config)?;
+        config
     } else {
-        // Home config (low priority)
-        load_toml(&config_dir()?.join("code-mode.toml"), &mut config)?;
-        // Local config (high priority — overwrites home)
-        let local_path = std::env::current_dir()
-            .context("failed to determine current directory")?
-            .join("code-mode.toml");
-        load_toml(&local_path, &mut config)?;
-    }
+        let start_dir = std::env::current_dir().context("failed to determine current directory")?;
+        load_default_config(&start_dir, &config_dir()?.join("code-mode.toml"))?
+    };
 
     if config_needs_interpolation(&config) {
         let variables: HashMap<String, String> = std::env::vars().collect();
@@ -279,10 +295,13 @@ pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ServerEntry, config_needs_interpolation, interpolate_config, interpolate_string,
+        Config, ServerEntry, config_needs_interpolation, find_local_config_path,
+        interpolate_config, interpolate_string, load_default_config,
     };
     use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_entry() -> ServerEntry {
         ServerEntry {
@@ -370,5 +389,75 @@ mod tests {
             Some("Bearer abc123")
         );
         assert_eq!(entry.url.as_deref(), Some("https://example.com/script.mjs"));
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "code-mode-config-tests-{name}-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn finds_nearest_local_config_in_ancestor_directory() {
+        let temp_dir = unique_temp_dir("find-local-config");
+        let workspace_dir = temp_dir.join("workspace");
+        let crate_dir = workspace_dir.join("crate");
+        let nested_dir = crate_dir.join("src/bin");
+
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(workspace_dir.join("code-mode.toml"), "").unwrap();
+        fs::write(crate_dir.join("code-mode.toml"), "").unwrap();
+
+        let discovered = find_local_config_path(&nested_dir);
+        assert_eq!(discovered, Some(crate_dir.join("code-mode.toml")));
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn load_default_config_merges_global_and_nearest_local_config() {
+        let temp_dir = unique_temp_dir("load-default-config");
+        let config_home = temp_dir.join("xdg/code-mode");
+        let workspace_dir = temp_dir.join("workspace");
+        let nested_dir = workspace_dir.join(".workspaces/task");
+
+        fs::create_dir_all(&config_home).unwrap();
+        fs::create_dir_all(&nested_dir).unwrap();
+
+        fs::write(
+            config_home.join("code-mode.toml"),
+            r#"
+base_dir = "global-sdk"
+
+[servers.global]
+command = "global-command"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace_dir.join("code-mode.toml"),
+            r#"
+base_dir = "local-sdk"
+
+[servers.local]
+command = "local-command"
+"#,
+        )
+        .unwrap();
+
+        let config = load_default_config(&nested_dir, &config_home.join("code-mode.toml")).unwrap();
+
+        assert_eq!(config.base_dir, Some(PathBuf::from("local-sdk")));
+        assert!(config.servers.contains_key("global"));
+        assert!(config.servers.contains_key("local"));
+
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 }
