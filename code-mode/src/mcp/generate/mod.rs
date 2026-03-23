@@ -127,8 +127,7 @@ fn instructions_markdown(server_name: &str, instructions: Option<&str>) -> Optio
     Some(format!("# {server_name}\n\n{instructions}\n"))
 }
 
-fn render_client_ts(exe_path: &Path) -> String {
-    let exe_str = exe_path.display().to_string().replace('\\', "\\\\");
+fn render_client_ts() -> String {
     format!(
         r#"import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
 import {{ StdioClientTransport }} from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -138,7 +137,7 @@ let client: Client | null = null;
 export async function getClient(): Promise<Client> {{
   if (client) return client;
   const transport = new StdioClientTransport({{
-    command: "{}",
+    command: "code-mode",
     args: ["mcp", "serve"],
     env: Object.fromEntries(
       Object.entries(process.env).filter(
@@ -170,7 +169,6 @@ export async function closeAll(): Promise<void> {{
   }}
 }}
 "#,
-        exe_str
     )
 }
 
@@ -270,7 +268,7 @@ fn render_tool_file(
 }
 
 /// Render the TypeScript SDK into an in-memory file set.
-fn render_sdk(exe_path: &Path, servers: &[(String, DiscoveryResult)]) -> Result<RenderedSdk> {
+fn render_sdk(servers: &[(String, DiscoveryResult)]) -> Result<RenderedSdk> {
     let mut rendered = RenderedSdk::default();
 
     // Write package.json in base dir (for bun install)
@@ -284,7 +282,7 @@ fn render_sdk(exe_path: &Path, servers: &[(String, DiscoveryResult)]) -> Result<
         }
     });
     rendered.push_file("package.json", serde_json::to_string_pretty(&package_json)?);
-    rendered.push_file("sdk/client.ts", render_client_ts(exe_path));
+    rendered.push_file("sdk/client.ts", render_client_ts());
 
     let schema_options = SchemaToTsOptions::default();
 
@@ -384,8 +382,7 @@ fn write_rendered_sdk(base_dir: &Path, rendered: &RenderedSdk) -> Result<()> {
 
 /// Generate the base directory structure and TypeScript SDK.
 fn generate(base_dir: &Path, servers: &[(String, DiscoveryResult)]) -> Result<()> {
-    let exe_path = std::env::current_exe().context("failed to determine code-mode binary path")?;
-    let rendered = render_sdk(&exe_path, servers)?;
+    let rendered = render_sdk(servers)?;
     write_rendered_sdk(base_dir, &rendered)
 }
 
@@ -546,10 +543,7 @@ mod tests {
 
     #[test]
     fn render_sdk_includes_instructions_when_present() -> Result<()> {
-        let rendered = render_sdk(
-            Path::new("/tmp/code-mode"),
-            &[server("demo", Some("Use this server carefully."))],
-        )?;
+        let rendered = render_sdk(&[server("demo", Some("Use this server carefully."))])?;
         let files = rendered_files_map(&rendered);
         assert_eq!(
             files.get("sdk/demo/INSTRUCTIONS.md").map(String::as_str),
@@ -562,10 +556,7 @@ mod tests {
 
     #[test]
     fn render_sdk_marks_blank_instructions_for_cleanup_without_file_io() -> Result<()> {
-        let rendered = render_sdk(
-            Path::new("/tmp/code-mode"),
-            &[server("demo", Some("   \n"))],
-        )?;
+        let rendered = render_sdk(&[server("demo", Some("   \n"))])?;
         let files = rendered_files_map(&rendered);
         assert!(!files.contains_key("sdk/demo/INSTRUCTIONS.md"));
         assert_eq!(
@@ -583,10 +574,7 @@ mod tests {
         std::fs::create_dir_all(instructions_path.parent().expect("path has parent"))?;
         std::fs::write(&instructions_path, "stale instructions")?;
 
-        let rendered = render_sdk(
-            Path::new("/tmp/code-mode"),
-            &[server("demo", Some("   \n"))],
-        )?;
+        let rendered = render_sdk(&[server("demo", Some("   \n"))])?;
         write_rendered_sdk(temp_dir.path(), &rendered)?;
 
         assert!(!instructions_path.exists());
@@ -616,16 +604,13 @@ mod tests {
             })),
         )];
 
-        let rendered = render_sdk(
-            Path::new("/tmp/code-mode"),
-            &[(
-                "demo".into(),
-                DiscoveryResult {
-                    instructions: None,
-                    tools,
-                },
-            )],
-        )?;
+        let rendered = render_sdk(&[(
+            "demo".into(),
+            DiscoveryResult {
+                instructions: None,
+                tools,
+            },
+        )])?;
         let files = rendered_files_map(&rendered);
 
         let content = files
@@ -646,6 +631,7 @@ mod tests {
         let client = files
             .get("sdk/client.ts")
             .expect("client file should be rendered");
+        assert!(client.contains("command: \"code-mode\""));
         assert!(client.contains("export async function execute<T = unknown>("));
         assert!(client.contains("structuredContent?: T"));
 
