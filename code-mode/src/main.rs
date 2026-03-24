@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use rmcp::{ServiceExt, handler::server::wrapper::Parameters, transport::stdio};
-use tracing_subscriber::{self, EnvFilter};
 
 mod mcp;
 
@@ -87,17 +86,15 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             McpCommands::Serve { config } => {
+                let cfg = load_config(config.as_deref())?;
                 tracing_subscriber::fmt()
-                    .with_env_filter(
-                        EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()),
-                    )
+                    .with_env_filter(cfg.log.to_tracing_env_filter()?)
                     .with_writer(std::io::stderr)
                     .with_ansi(false)
                     .init();
 
                 tracing::info!("Starting Code Mode MCP server");
 
-                let cfg = load_config(config.as_deref())?;
                 let service = CodeModeServer::new(&cfg)
                     .serve(stdio())
                     .await

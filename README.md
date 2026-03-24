@@ -14,11 +14,13 @@ This project is a reproduction of the "serverside code mode" pattern as initiall
 - If you pass `--config /path/to/code-mode.toml`, only that file is used.
 - Otherwise `code-mode` merges `~/.config/code-mode/code-mode.toml` with the nearest ancestor `code-mode.toml` discovered from the current directory.
 - Local config wins over global config when the same top-level keys or server names are defined in both places.
+- `CODE_MODE_*` environment variables override values from either config file.
 
 The top-level schema is:
 
 ```toml
 base_dir = ".code-mode"
+log = "error"
 
 [servers.<name>]
 transport = "stdio" # optional, defaults to "stdio"
@@ -36,6 +38,7 @@ headers = { Authorization = "Bearer $API_TOKEN" }
 ### Top-Level Fields
 
 - `base_dir` is optional and controls where `mcp generate` writes the generated SDK. If omitted, the default is `.code-mode`.
+- `log` is optional and controls the verbosity of `mcp serve`. If omitted, the default is `error`. You can also override it with `CODE_MODE_LOG`.
 - `servers` is a map keyed by server name. Each entry defines one downstream MCP server.
 
 ### Server Entry Schema
@@ -60,6 +63,7 @@ Validation rules:
 String interpolation is applied after config files are merged. Expansion currently applies to:
 
 - `base_dir`
+- `log`
 - `command`
 - every item in `args`
 - every value in `env`
@@ -93,6 +97,7 @@ Example:
 
 ```toml
 base_dir = "$CODE_MODE_OUTPUT"
+log = "$CODE_MODE_DEFAULT_LOG"
 
 [servers.local-tools]
 command = "node"

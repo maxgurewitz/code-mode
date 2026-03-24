@@ -3,16 +3,49 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use figment::{
+    Figment,
+    providers::{Env, Serialized},
+};
+use serde::{Deserialize, Serialize};
+use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
-#[derive(Debug, Deserialize, Clone)]
+const CONFIG_ENV_PREFIX: &str = "CODE_MODE_";
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
 pub struct Config {
     pub base_dir: Option<PathBuf>,
+    pub log: LogFilter,
     #[serde(default)]
     pub servers: HashMap<String, ServerEntry>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct LogFilter(String);
+
+impl Default for LogFilter {
+    fn default() -> Self {
+        Self("error".into())
+    }
+}
+
+impl LogFilter {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn to_tracing_env_filter(&self) -> Result<EnvFilter> {
+        EnvFilter::builder()
+            .with_default_directive(LevelFilter::ERROR.into())
+            .parse(&self.0)
+            .with_context(|| format!("invalid log filter {:?}", self.0))
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct ServerEntry {
     #[serde(default = "default_transport")]
     pub transport: String,
@@ -24,6 +57,27 @@ pub struct ServerEntry {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PartialConfig {
+    base_dir: Option<PathBuf>,
+    log: Option<LogFilter>,
+    #[serde(default)]
+    servers: HashMap<String, ServerEntry>,
+}
+
+impl Default for ServerEntry {
+    fn default() -> Self {
+        Self {
+            transport: default_transport(),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
+        }
+    }
 }
 
 fn default_transport() -> String {
@@ -81,21 +135,17 @@ fn load_toml(path: &Path, config: &mut Config) -> Result<()> {
     if path.exists() {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let cfg: Config = toml::from_str(&content)
+        let cfg: PartialConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         if cfg.base_dir.is_some() {
             config.base_dir = cfg.base_dir;
         }
+        if let Some(log) = cfg.log {
+            config.log = log;
+        }
         config.servers.extend(cfg.servers);
     }
     Ok(())
-}
-
-fn empty_config() -> Config {
-    Config {
-        base_dir: None,
-        servers: HashMap::new(),
-    }
 }
 
 fn find_local_config_path(start_dir: &Path) -> Option<PathBuf> {
@@ -106,7 +156,7 @@ fn find_local_config_path(start_dir: &Path) -> Option<PathBuf> {
 }
 
 fn load_default_config(start_dir: &Path, global_path: &Path) -> Result<Config> {
-    let mut config = empty_config();
+    let mut config = Config::default();
     load_toml(global_path, &mut config)?;
     if let Some(local_path) = find_local_config_path(start_dir) {
         load_toml(&local_path, &mut config)?;
@@ -207,6 +257,7 @@ fn config_needs_interpolation(config: &Config) -> bool {
         .as_ref()
         .map(|path| string_needs_interpolation(&path.to_string_lossy()))
         .unwrap_or(false)
+        || string_needs_interpolation(config.log.as_str())
         || config.servers.values().any(|entry| {
             entry
                 .command
@@ -237,6 +288,7 @@ fn interpolate_config(config: &mut Config, variables: &HashMap<String, String>) 
             variables,
         )));
     }
+    config.log = LogFilter(interpolate_string(config.log.as_str(), variables));
 
     for entry in config.servers.values_mut() {
         entry.command = entry
@@ -265,14 +317,22 @@ fn interpolate_config(config: &mut Config, variables: &HashMap<String, String>) 
     }
 }
 
+fn apply_env_overrides(config: Config) -> Result<Config> {
+    Figment::from(Serialized::defaults(config))
+        .merge(Env::prefixed(CONFIG_ENV_PREFIX).split("__"))
+        .extract()
+        .context("failed to parse CODE_MODE_* environment overrides")
+}
+
 /// Load and merge config. When `config_path` is provided, only that file is
 /// used. Otherwise merges `~/.config/code-mode/code-mode.toml` (global) with
 /// the nearest ancestor `code-mode.toml` from the current directory, with the
-/// local config overriding global settings.
+/// local config overriding global settings and `CODE_MODE_*` environment
+/// variables overriding both.
 pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
     let mut config = if let Some(path) = config_path {
         anyhow::ensure!(path.exists(), "config file not found: {}", path.display());
-        let mut config = empty_config();
+        let mut config = Config::default();
         load_toml(path, &mut config)?;
         config
     } else {
@@ -280,10 +340,14 @@ pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
         load_default_config(&start_dir, &config_dir()?.join("code-mode.toml"))?
     };
 
+    config = apply_env_overrides(config)?;
+
     if config_needs_interpolation(&config) {
         let variables: HashMap<String, String> = std::env::vars().collect();
         interpolate_config(&mut config, &variables);
     }
+
+    config.log.to_tracing_env_filter()?;
 
     for (name, entry) in &config.servers {
         validate_entry(name, entry)?;
@@ -295,13 +359,48 @@ pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ServerEntry, config_needs_interpolation, find_local_config_path,
-        interpolate_config, interpolate_string, load_default_config,
+        CONFIG_ENV_PREFIX, Config, LogFilter, ServerEntry, config_needs_interpolation,
+        find_local_config_path, interpolate_config, interpolate_string, load_config,
+        load_default_config,
     };
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: impl Into<String>, value: Option<&str>) -> Self {
+            let key = key.into();
+            let previous = std::env::var_os(&key);
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(&key, value),
+                    None => std::env::remove_var(&key),
+                }
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(&self.key, value),
+                    None => std::env::remove_var(&self.key),
+                }
+            }
+        }
+    }
 
     fn test_entry() -> ServerEntry {
         ServerEntry {
@@ -353,6 +452,7 @@ mod tests {
     fn interpolates_config_fields_used_by_mcp_servers() {
         let mut config = Config {
             base_dir: Some(PathBuf::from("$BASE_DIR")),
+            log: LogFilter("$LOG_FILTER".into()),
             servers: HashMap::from([("fixture".into(), test_entry())]),
         };
 
@@ -364,12 +464,14 @@ mod tests {
             ("ENV_ONE".into(), "secret".into()),
             ("ENV_TWO".into(), "another".into()),
             ("TOKEN".into(), "abc123".into()),
+            ("LOG_FILTER".into(), "debug".into()),
         ]);
 
         assert!(config_needs_interpolation(&config));
         interpolate_config(&mut config, &variables);
 
         assert_eq!(config.base_dir, Some(PathBuf::from(".tmp/.code-mode")));
+        assert_eq!(config.log, LogFilter("debug".into()));
         let entry = config.servers.get("fixture").unwrap();
         assert_eq!(entry.command.as_deref(), Some("node"));
         assert_eq!(
@@ -435,6 +537,7 @@ mod tests {
             config_home.join("code-mode.toml"),
             r#"
 base_dir = "global-sdk"
+log = "warn"
 
 [servers.global]
 command = "global-command"
@@ -455,8 +558,59 @@ command = "local-command"
         let config = load_default_config(&nested_dir, &config_home.join("code-mode.toml")).unwrap();
 
         assert_eq!(config.base_dir, Some(PathBuf::from("local-sdk")));
+        assert_eq!(config.log, LogFilter("warn".into()));
         assert!(config.servers.contains_key("global"));
         assert!(config.servers.contains_key("local"));
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn load_config_applies_code_mode_log_env_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp_dir = unique_temp_dir("load-config-env-override");
+        let config_path = temp_dir.join("code-mode.toml");
+        let env_key = format!("{CONFIG_ENV_PREFIX}LOG");
+        let _guard = EnvVarGuard::set(&env_key, Some("debug"));
+
+        fs::write(
+            &config_path,
+            r#"
+log = "info"
+
+[servers.demo]
+command = "node"
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path)).unwrap();
+
+        assert_eq!(config.log, LogFilter("debug".into()));
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn load_config_defaults_log_to_error() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp_dir = unique_temp_dir("load-config-default-log");
+        let config_path = temp_dir.join("code-mode.toml");
+        let env_key = format!("{CONFIG_ENV_PREFIX}LOG");
+        let _guard = EnvVarGuard::set(&env_key, None);
+
+        fs::write(
+            &config_path,
+            r#"
+[servers.demo]
+command = "node"
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path)).unwrap();
+
+        assert_eq!(config.log, LogFilter::default());
 
         fs::remove_dir_all(temp_dir).unwrap();
     }

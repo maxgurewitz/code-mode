@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+figment = { version = "0.10", features = ["env"] }
 rmcp = { version = "1", features = ["server", "client", "macros", "transport-io", "transport-child-process", "schemars"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
