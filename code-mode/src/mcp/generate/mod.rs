@@ -136,29 +136,31 @@ import {{ StdioClientTransport }} from "@modelcontextprotocol/sdk/client/stdio.j
 let client: Client | null = null;
 let clientPromise: Promise<Client> | null = null;
 
+async function initializeClient(): Promise<Client> {{
+  const transport = new StdioClientTransport({{
+    command: "code-mode",
+    args: ["mcp", "serve"],
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+  }});
+  const nextClient = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
+  try {{
+    await nextClient.connect(transport);
+    client = nextClient;
+    return nextClient;
+  }} catch (error) {{
+    clientPromise = null;
+    throw error;
+  }}
+}}
+
 export async function getClient(): Promise<Client> {{
   if (client) return client;
   if (!clientPromise) {{
-    clientPromise = (async () => {{
-      const transport = new StdioClientTransport({{
-        command: "code-mode",
-        args: ["mcp", "serve"],
-        env: Object.fromEntries(
-          Object.entries(process.env).filter(
-            (entry): entry is [string, string] => entry[1] !== undefined,
-          ),
-        ),
-      }});
-      const nextClient = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
-      try {{
-        await nextClient.connect(transport);
-        client = nextClient;
-        return nextClient;
-      }} catch (error) {{
-        clientPromise = null;
-        throw error;
-      }}
-    }})();
+    clientPromise = initializeClient();
   }}
   return clientPromise;
 }}
@@ -687,9 +689,10 @@ mod tests {
             .get("sdk/client.ts")
             .expect("client file should be rendered");
         assert!(client.contains("let clientPromise: Promise<Client> | null = null;"));
+        assert!(client.contains("async function initializeClient(): Promise<Client> {"));
         assert!(client.contains("command: \"code-mode\""));
         assert!(client.contains("if (!clientPromise) {"));
-        assert!(client.contains("clientPromise = (async () => {"));
+        assert!(client.contains("clientPromise = initializeClient();"));
         assert!(client.contains("await nextClient.connect(transport);"));
         assert!(client.contains("client = nextClient;"));
         assert!(client.contains("return clientPromise;"));
