@@ -134,21 +134,33 @@ fn render_client_ts() -> String {
 import {{ StdioClientTransport }} from "@modelcontextprotocol/sdk/client/stdio.js";
 
 let client: Client | null = null;
+let clientPromise: Promise<Client> | null = null;
 
 export async function getClient(): Promise<Client> {{
   if (client) return client;
-  const transport = new StdioClientTransport({{
-    command: "code-mode",
-    args: ["mcp", "serve"],
-    env: Object.fromEntries(
-      Object.entries(process.env).filter(
-        (entry): entry is [string, string] => entry[1] !== undefined,
-      ),
-    ),
-  }});
-  client = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
-  await client.connect(transport);
-  return client;
+  if (!clientPromise) {{
+    clientPromise = (async () => {{
+      const transport = new StdioClientTransport({{
+        command: "code-mode",
+        args: ["mcp", "serve"],
+        env: Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        ),
+      }});
+      const nextClient = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
+      try {{
+        await nextClient.connect(transport);
+        client = nextClient;
+        return nextClient;
+      }} catch (error) {{
+        clientPromise = null;
+        throw error;
+      }}
+    }})();
+  }}
+  return clientPromise;
 }}
 
 export async function execute<T = unknown>(params: Record<string, unknown>): Promise<T> {{
@@ -164,9 +176,16 @@ export async function execute<T = unknown>(params: Record<string, unknown>): Pro
 }}
 
 export async function closeAll(): Promise<void> {{
-  if (client) {{
-    await client.close();
-    client = null;
+  try {{
+    await clientPromise;
+  }} catch {{
+    // Ignore initialization failures during teardown.
+  }}
+  const connectedClient = client;
+  client = null;
+  clientPromise = null;
+  if (connectedClient) {{
+    await connectedClient.close();
   }}
 }}
 "#,
@@ -667,9 +686,17 @@ mod tests {
         let client = files
             .get("sdk/client.ts")
             .expect("client file should be rendered");
+        assert!(client.contains("let clientPromise: Promise<Client> | null = null;"));
         assert!(client.contains("command: \"code-mode\""));
+        assert!(client.contains("if (!clientPromise) {"));
+        assert!(client.contains("clientPromise = (async () => {"));
+        assert!(client.contains("await nextClient.connect(transport);"));
+        assert!(client.contains("client = nextClient;"));
+        assert!(client.contains("return clientPromise;"));
         assert!(client.contains("export async function execute<T = unknown>("));
         assert!(client.contains("structuredContent?: T"));
+        assert!(client.contains("await clientPromise;"));
+        assert!(client.contains("clientPromise = null;"));
 
         Ok(())
     }
