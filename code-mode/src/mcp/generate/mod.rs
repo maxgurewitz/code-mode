@@ -13,6 +13,7 @@ use schema_to_ts::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::builtin;
 use super::config::{Config, ServerEntry};
 
 /// A discovered tool from a downstream MCP server.
@@ -267,6 +268,44 @@ fn render_tool_file(
     ))
 }
 
+fn render_server_sdk(
+    rendered: &mut RenderedSdk,
+    server_name: &str,
+    instructions: Option<&str>,
+    tools: &[Tool],
+    schema_options: &SchemaToTsOptions,
+    manifest_tools: &mut Vec<DiscoveredTool>,
+    include_in_manifest: bool,
+) -> Result<String> {
+    let instructions_path = PathBuf::from(format!("sdk/{server_name}/INSTRUCTIONS.md"));
+    if let Some(instructions) = instructions_markdown(server_name, instructions) {
+        rendered.push_file(&instructions_path, instructions);
+    } else {
+        rendered.push_cleanup_path(&instructions_path);
+    }
+
+    let mut server_exports = Vec::new();
+    for tool in tools {
+        let tool_name = tool.name.as_ref();
+        let (tool_code, manifest_tool) = render_tool_file(server_name, tool, schema_options)?;
+        let file_name = format!("sdk/{server_name}/{tool_name}.ts");
+        rendered.push_file(&file_name, tool_code);
+        server_exports.push(format!("export * from \"./{tool_name}.js\";"));
+
+        if include_in_manifest {
+            manifest_tools.push(manifest_tool);
+        }
+    }
+
+    let server_index = server_exports.join("\n") + "\n";
+    rendered.push_file(format!("sdk/{server_name}/index.ts"), server_index);
+
+    let camel = to_camel_case(server_name);
+    Ok(format!(
+        "export * as {camel} from \"./{server_name}/index.js\";"
+    ))
+}
+
 /// Render the TypeScript SDK into an in-memory file set.
 fn render_sdk(servers: &[(String, DiscoveryResult)]) -> Result<RenderedSdk> {
     let mut rendered = RenderedSdk::default();
@@ -289,35 +328,26 @@ fn render_sdk(servers: &[(String, DiscoveryResult)]) -> Result<RenderedSdk> {
     let mut index_exports = Vec::new();
     let mut manifest_tools = Vec::new();
 
+    index_exports.push(render_server_sdk(
+        &mut rendered,
+        builtin::SYSTEM_SERVER_NAME,
+        None,
+        &builtin::tools(),
+        &schema_options,
+        &mut manifest_tools,
+        false,
+    )?);
+
     for (server_name, discovery) in servers {
-        let instructions_path = PathBuf::from(format!("sdk/{server_name}/INSTRUCTIONS.md"));
-        if let Some(instructions) =
-            instructions_markdown(server_name, discovery.instructions.as_deref())
-        {
-            rendered.push_file(&instructions_path, instructions);
-        } else {
-            rendered.push_cleanup_path(&instructions_path);
-        }
-
-        let mut server_exports = Vec::new();
-
-        for tool in &discovery.tools {
-            let tool_name = tool.name.as_ref();
-            let (tool_code, manifest_tool) = render_tool_file(server_name, tool, &schema_options)?;
-            let file_name = format!("sdk/{server_name}/{tool_name}.ts");
-            rendered.push_file(&file_name, tool_code);
-
-            server_exports.push(format!("export * from \"./{tool_name}.js\";"));
-            manifest_tools.push(manifest_tool);
-        }
-
-        let server_index = server_exports.join("\n") + "\n";
-        rendered.push_file(format!("sdk/{server_name}/index.ts"), server_index);
-
-        let camel = to_camel_case(server_name);
-        index_exports.push(format!(
-            "export * as {camel} from \"./{server_name}/index.js\";"
-        ));
+        index_exports.push(render_server_sdk(
+            &mut rendered,
+            server_name,
+            discovery.instructions.as_deref(),
+            &discovery.tools,
+            &schema_options,
+            &mut manifest_tools,
+            true,
+        )?);
     }
 
     index_exports.push("export { execute, closeAll } from \"./client.js\";".into());
@@ -549,7 +579,10 @@ mod tests {
             files.get("sdk/demo/INSTRUCTIONS.md").map(String::as_str),
             Some("# demo\n\nUse this server carefully.\n")
         );
-        assert!(rendered.cleanup_paths.is_empty());
+        assert_eq!(
+            rendered.cleanup_paths,
+            vec![PathBuf::from("sdk/system/INSTRUCTIONS.md")]
+        );
 
         Ok(())
     }
@@ -561,7 +594,10 @@ mod tests {
         assert!(!files.contains_key("sdk/demo/INSTRUCTIONS.md"));
         assert_eq!(
             rendered.cleanup_paths,
-            vec![PathBuf::from("sdk/demo/INSTRUCTIONS.md")]
+            vec![
+                PathBuf::from("sdk/system/INSTRUCTIONS.md"),
+                PathBuf::from("sdk/demo/INSTRUCTIONS.md"),
+            ]
         );
 
         Ok(())
@@ -634,6 +670,35 @@ mod tests {
         assert!(client.contains("command: \"code-mode\""));
         assert!(client.contains("export async function execute<T = unknown>("));
         assert!(client.contains("structuredContent?: T"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn render_sdk_emits_system_builtins_without_adding_them_to_manifest() -> Result<()> {
+        let rendered = render_sdk(&[])?;
+        let files = rendered_files_map(&rendered);
+
+        let root_index = files
+            .get("sdk/index.ts")
+            .expect("root index should be rendered");
+        assert!(root_index.contains("export * as system from \"./system/index.js\";"));
+
+        let system_index = files
+            .get("sdk/system/index.ts")
+            .expect("system index should be rendered");
+        assert!(system_index.contains("export * from \"./logs_current.js\";"));
+        assert!(system_index.contains("export * from \"./logs_read.js\";"));
+
+        let logs_current = files
+            .get("sdk/system/logs_current.ts")
+            .expect("system logs_current wrapper should be rendered");
+        assert!(logs_current.contains("type: \"system.logs_current\""));
+
+        let manifest = files
+            .get("sdk/manifest.json")
+            .expect("manifest should be rendered");
+        assert!(!manifest.contains("\"server\": \"system\""));
 
         Ok(())
     }

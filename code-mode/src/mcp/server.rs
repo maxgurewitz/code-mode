@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
@@ -6,12 +6,10 @@ use rmcp::{
 };
 use tracing::info;
 
+use super::builtin::{self, SYSTEM_SERVER_NAME};
 use super::config::Config;
 use super::downstream::DownstreamManager;
-use super::types::{
-    ExecuteInput, ExecuteRequest, ExecuteResult, SearchRequest, SearchResultEntry,
-    operation_registry,
-};
+use super::types::{ExecuteInput, SearchRequest, SearchResultEntry, wrap_execute_schema};
 
 /// The Code Mode MCP server.
 ///
@@ -27,19 +25,20 @@ use super::types::{
 pub struct CodeModeServer {
     tool_router: ToolRouter<CodeModeServer>,
     downstream: Arc<DownstreamManager>,
-    downstream_registry: Arc<Vec<SearchResultEntry>>,
+    registry: Arc<Vec<SearchResultEntry>>,
 }
 
 #[tool_router]
 impl CodeModeServer {
     pub fn new(config: &Config) -> Self {
         let downstream = DownstreamManager::from_config(config);
-        let downstream_registry = load_manifest_registry();
+        let mut registry = builtin::search_registry();
+        registry.extend(load_manifest_registry(config));
 
         Self {
             tool_router: Self::tool_router(),
             downstream: Arc::new(downstream),
-            downstream_registry: Arc::new(downstream_registry),
+            registry: Arc::new(registry),
         }
     }
 
@@ -58,10 +57,9 @@ impl CodeModeServer {
 
         let query = req.query.to_lowercase();
 
-        let static_results = operation_registry();
-        let results: Vec<_> = static_results
+        let results: Vec<_> = self
+            .registry
             .iter()
-            .chain(self.downstream_registry.iter())
             .filter(|entry| {
                 entry.name.to_lowercase().contains(&query)
                     || entry.description.to_lowercase().contains(&query)
@@ -84,7 +82,6 @@ impl CodeModeServer {
         &self,
         Parameters(input): Parameters<ExecuteInput>,
     ) -> Result<CallToolResult, McpError> {
-        // Extract the type string first (before consuming input)
         let type_str = input
             .raw
             .get("type")
@@ -92,18 +89,15 @@ impl CodeModeServer {
             .map(|s| s.to_string())
             .ok_or_else(|| McpError::invalid_params("missing 'type' field", None))?;
 
-        // Try static types first
-        let raw_value = serde_json::Value::Object(input.raw.clone());
-        if let Ok(req) = serde_json::from_value::<ExecuteRequest>(raw_value) {
-            return self.handle_static_execute(req);
-        }
-
-        // Try downstream routing: check for server.tool pattern
         if let Some((server, tool)) = type_str.split_once('.') {
-            if self.downstream.has_server(server) {
-                let mut args = input.raw;
-                args.remove("type");
+            let mut args = input.raw;
+            args.remove("type");
 
+            if server == SYSTEM_SERVER_NAME && builtin::has_tool(tool) {
+                return builtin::execute(tool, args, &self.downstream).await;
+            }
+
+            if self.downstream.has_server(server) {
                 let result = self
                     .downstream
                     .call_tool(server, tool, args)
@@ -121,65 +115,20 @@ impl CodeModeServer {
     }
 }
 
-impl CodeModeServer {
-    fn handle_static_execute(&self, req: ExecuteRequest) -> Result<CallToolResult, McpError> {
-        let result = match req {
-            ExecuteRequest::WorkspaceFork { ref description } => {
-                info!(description = %description, "execute: workspace.fork");
-                ExecuteResult {
-                    success: true,
-                    message: format!(
-                        "workspace.fork: not yet implemented (description: {description})"
-                    ),
-                    data: None,
-                }
-            }
-            ExecuteRequest::WorkspaceJoin => {
-                info!("execute: workspace.join");
-                ExecuteResult {
-                    success: true,
-                    message: "workspace.join: not yet implemented".into(),
-                    data: None,
-                }
-            }
-            ExecuteRequest::WorkspaceSnapshot { ref message } => {
-                info!(message = %message, "execute: workspace.snapshot");
-                ExecuteResult {
-                    success: true,
-                    message: format!(
-                        "workspace.snapshot: not yet implemented (message: {message})"
-                    ),
-                    data: None,
-                }
-            }
-            ExecuteRequest::WorkspaceDescribe { ref message } => {
-                info!(message = %message, "execute: workspace.describe");
-                ExecuteResult {
-                    success: true,
-                    message: format!(
-                        "workspace.describe: not yet implemented (message: {message})"
-                    ),
-                    data: None,
-                }
-            }
-            ExecuteRequest::LlmQuery { ref prompt } => {
-                info!(prompt_len = prompt.len(), "execute: llm_query");
-                ExecuteResult {
-                    success: true,
-                    message: "llm_query: not yet implemented".into(),
-                    data: None,
-                }
-            }
-        };
-
-        let json = serde_json::to_string_pretty(&result).unwrap_or_default();
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-}
-
 /// Load downstream tool registry from the generated manifest.json.
-fn load_manifest_registry() -> Vec<SearchResultEntry> {
-    let manifest_path = std::path::Path::new(".code-mode/sdk/manifest.json");
+fn load_manifest_registry(config: &Config) -> Vec<SearchResultEntry> {
+    let base_dir = config
+        .base_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".code-mode"));
+    let base_dir = if base_dir.is_absolute() {
+        base_dir
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(base_dir)
+    };
+    let manifest_path = base_dir.join("sdk/manifest.json");
     let Ok(content) = std::fs::read_to_string(manifest_path) else {
         return Vec::new();
     };
@@ -206,7 +155,10 @@ fn load_manifest_registry() -> Vec<SearchResultEntry> {
             SearchResultEntry {
                 name: op_name,
                 description,
-                parameters_schema: t.input_schema,
+                parameters_schema: wrap_execute_schema(
+                    &format!("{}.{}", t.server, t.name),
+                    &t.input_schema,
+                ),
             }
         })
         .collect()

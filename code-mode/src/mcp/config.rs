@@ -98,6 +98,11 @@ pub fn config_dir() -> Result<PathBuf> {
 
 /// Validates that each server entry has the fields required by its transport type.
 fn validate_entry(name: &str, entry: &ServerEntry) -> Result<()> {
+    anyhow::ensure!(
+        name != "system",
+        "server \"system\" is reserved for built-in code-mode operations"
+    );
+
     match entry.transport.as_str() {
         "stdio" => {
             anyhow::ensure!(
@@ -361,7 +366,7 @@ mod tests {
     use super::{
         CONFIG_ENV_PREFIX, Config, LogFilter, ServerEntry, config_needs_interpolation,
         find_local_config_path, interpolate_config, interpolate_string, load_config,
-        load_default_config,
+        load_default_config, validate_entry,
     };
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -613,5 +618,14 @@ command = "node"
         assert_eq!(config.log, LogFilter::default());
 
         fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_reserved_system_server_name() {
+        let err = validate_entry("system", &ServerEntry::default()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("server \"system\" is reserved for built-in code-mode operations")
+        );
     }
 }

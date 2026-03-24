@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 
 /// Request parameters for the `search` tool.
 ///
@@ -15,7 +16,7 @@ pub struct SearchRequest {
 /// A single entry returned by `search`.
 #[derive(Debug, Serialize)]
 pub struct SearchResultEntry {
-    /// The operation type identifier (e.g. "workspace.fork").
+    /// The operation type identifier (e.g. "server.tool").
     pub name: String,
     /// Human-readable description of the operation.
     pub description: String,
@@ -55,134 +56,38 @@ impl schemars::JsonSchema for ExecuteInput {
     }
 }
 
-/// The internal discriminated union used for server-side deserialization.
-///
-/// This type is NOT exposed in the MCP tool schema — agents discover
-/// variants via `search` and the server deserializes the raw JSON into
-/// this enum.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub enum ExecuteRequest {
-    /// Fork the current workspace into a child workspace.
-    #[serde(rename = "workspace.fork")]
-    WorkspaceFork {
-        /// A human-readable description of what the child workspace will do.
-        description: String,
-    },
+pub fn wrap_execute_schema(type_name: &str, input_schema: &Value) -> Value {
+    let mut schema = match input_schema {
+        Value::Object(schema) => schema.clone(),
+        _ => Map::new(),
+    };
 
-    /// Join the child workspace back into its parent, rebasing changes.
-    #[serde(rename = "workspace.join")]
-    WorkspaceJoin,
+    if !matches!(schema.get("type"), Some(Value::String(schema_type)) if schema_type == "object") {
+        schema.insert("type".into(), Value::String("object".into()));
+    }
 
-    /// Snapshot the current working copy as a commit.
-    #[serde(rename = "workspace.snapshot")]
-    WorkspaceSnapshot {
-        /// Commit message for the snapshot.
-        message: String,
-    },
+    let mut properties = match schema.remove("properties") {
+        Some(Value::Object(properties)) => properties,
+        _ => Map::new(),
+    };
+    properties.insert("type".into(), json!({ "const": type_name }));
+    schema.insert("properties".into(), Value::Object(properties));
 
-    /// Update the description on the current workspace's working-copy commit.
-    #[serde(rename = "workspace.describe")]
-    WorkspaceDescribe {
-        /// The new description.
-        message: String,
-    },
+    let mut required = match schema.remove("required") {
+        Some(Value::Array(required)) => required,
+        _ => Vec::new(),
+    };
+    if !required
+        .iter()
+        .any(|value| matches!(value, Value::String(item) if item == "type"))
+    {
+        required.insert(0, Value::String("type".into()));
+    }
+    schema.insert("required".into(), Value::Array(required));
 
-    /// Perform a stateless LLM sub-call.
-    #[serde(rename = "llm_query")]
-    LlmQuery {
-        /// The prompt to send to the LLM.
-        prompt: String,
-    },
-}
+    if !schema.contains_key("additionalProperties") {
+        schema.insert("additionalProperties".into(), Value::Bool(true));
+    }
 
-/// The result returned by `execute`.
-#[derive(Debug, Serialize)]
-pub struct ExecuteResult {
-    /// Whether the operation succeeded.
-    pub success: bool,
-    /// A human-readable message or the operation's output.
-    pub message: String,
-    /// Optional structured data returned by the operation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-/// Returns the full operation registry — all known execute variants
-/// with their descriptions and parameter schemas.
-pub fn operation_registry() -> Vec<SearchResultEntry> {
-    vec![
-        SearchResultEntry {
-            name: "workspace.fork".into(),
-            description: "Fork the current workspace into a child workspace.".into(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "required": ["type", "description"],
-                "properties": {
-                    "type": { "const": "workspace.fork" },
-                    "description": {
-                        "type": "string",
-                        "description": "A human-readable description of what the child workspace will do."
-                    }
-                }
-            }),
-        },
-        SearchResultEntry {
-            name: "workspace.join".into(),
-            description: "Join the child workspace back into its parent, rebasing changes.".into(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": { "const": "workspace.join" }
-                }
-            }),
-        },
-        SearchResultEntry {
-            name: "workspace.snapshot".into(),
-            description: "Snapshot the current working copy as a commit.".into(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "required": ["type", "message"],
-                "properties": {
-                    "type": { "const": "workspace.snapshot" },
-                    "message": {
-                        "type": "string",
-                        "description": "Commit message for the snapshot."
-                    }
-                }
-            }),
-        },
-        SearchResultEntry {
-            name: "workspace.describe".into(),
-            description: "Update the description on the current workspace's working-copy commit."
-                .into(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "required": ["type", "message"],
-                "properties": {
-                    "type": { "const": "workspace.describe" },
-                    "message": {
-                        "type": "string",
-                        "description": "The new description."
-                    }
-                }
-            }),
-        },
-        SearchResultEntry {
-            name: "llm_query".into(),
-            description: "Perform a stateless LLM sub-call.".into(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "required": ["type", "prompt"],
-                "properties": {
-                    "type": { "const": "llm_query" },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The prompt to send to the LLM."
-                    }
-                }
-            }),
-        },
-    ]
+    Value::Object(schema)
 }

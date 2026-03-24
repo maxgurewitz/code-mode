@@ -14,6 +14,7 @@ server.registerTool(
     outputSchema: { text: z.string() },
   },
   async ({ message }) => {
+    console.error(`hello-world echo called: ${message}`);
     const structuredContent = { text: `You said: ${message}` };
     return {
       content: [
