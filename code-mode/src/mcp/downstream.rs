@@ -23,7 +23,7 @@ use tokio::{
     sync::Mutex,
 };
 
-use super::config::{Config, ServerEntry};
+use super::config::{Config, ServerEntry, state_dir};
 
 /// A live connection to a downstream MCP server.
 struct LiveConnection {
@@ -100,7 +100,7 @@ impl DownstreamManager {
             configs,
             connections: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            log_root: resolve_log_root(config),
+            log_root: resolve_log_root(),
             session_counter: AtomicU64::new(0),
         }
     }
@@ -330,19 +330,8 @@ impl DownstreamManager {
     }
 }
 
-fn resolve_log_root(config: &Config) -> PathBuf {
-    let base_dir = config
-        .base_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(".code-mode"));
-    let base_dir = if base_dir.is_absolute() {
-        base_dir
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(base_dir)
-    };
-    base_dir.join("logs")
+fn resolve_log_root() -> PathBuf {
+    state_dir().join("logs")
 }
 
 fn sanitize_path_component(value: &str) -> String {

@@ -38,6 +38,7 @@ headers = { Authorization = "Bearer $API_TOKEN" }
 ### Top-Level Fields
 
 - `base_dir` is optional and controls where `mcp generate` writes the generated SDK. If omitted, the default is `.code-mode`.
+- Runtime downstream MCP server logs are stored separately under `$XDG_STATE_HOME/code-mode/logs/` (default `~/.local/state/code-mode/logs/`). They are not written into `base_dir`.
 - `log` is optional and controls the verbosity of `mcp serve`. If omitted, the default is `error`. You can also override it with `CODE_MODE_LOG`.
 - `servers` is a map keyed by server name. Each entry defines one downstream MCP server.
 

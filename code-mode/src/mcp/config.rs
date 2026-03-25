@@ -96,6 +96,18 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(config_home.join("code-mode"))
 }
 
+/// Resolves the global state directory: `$XDG_STATE_HOME/code-mode/`
+/// (default `~/.local/state/code-mode/`).
+pub fn state_dir() -> PathBuf {
+    let state_home = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = dirs::home_dir().expect("could not determine home directory");
+            home.join(".local").join("state")
+        });
+    state_home.join("code-mode")
+}
+
 /// Validates that each server entry has the fields required by its transport type.
 fn validate_entry(name: &str, entry: &ServerEntry) -> Result<()> {
     anyhow::ensure!(
@@ -366,7 +378,7 @@ mod tests {
     use super::{
         CONFIG_ENV_PREFIX, Config, LogFilter, ServerEntry, config_needs_interpolation,
         find_local_config_path, interpolate_config, interpolate_string, load_config,
-        load_default_config, validate_entry,
+        load_default_config, state_dir, validate_entry,
     };
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -566,6 +578,37 @@ command = "local-command"
         assert_eq!(config.log, LogFilter("warn".into()));
         assert!(config.servers.contains_key("global"));
         assert!(config.servers.contains_key("local"));
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn state_dir_prefers_xdg_state_home() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp_dir = unique_temp_dir("state-dir-xdg-home");
+        let state_home = temp_dir.join("xdg-state");
+        fs::create_dir_all(&state_home).unwrap();
+        let _xdg_state_home = EnvVarGuard::set(
+            "XDG_STATE_HOME",
+            Some(state_home.to_string_lossy().as_ref()),
+        );
+        let _home = EnvVarGuard::set("HOME", Some("/tmp/code-mode-home-should-not-be-used"));
+
+        assert_eq!(state_dir(), state_home.join("code-mode"));
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn state_dir_defaults_to_home_local_state() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp_dir = unique_temp_dir("state-dir-default");
+        let home = temp_dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _xdg_state_home = EnvVarGuard::set("XDG_STATE_HOME", None);
+        let _home = EnvVarGuard::set("HOME", Some(home.to_string_lossy().as_ref()));
+
+        assert_eq!(state_dir(), home.join(".local/state/code-mode"));
 
         fs::remove_dir_all(temp_dir).unwrap();
     }
