@@ -8,3 +8,8 @@ args = ["$HELLO_WORLD_SERVER_PATH"]
 command = "node"
 args = ["$ECHO_SERVER_PATH", "$ECHO_SERVER_FLAG"]
 env = { TEST_SECRET = "$TEST_SECRET_SOURCE", BRACED_SECRET = "${BRACED_SECRET_SOURCE}" }
+
+[servers.openai-codex]
+command = "cargo"
+args = ["run", "-q", "--manifest-path", "$OPENAI_CODEX_MCP_MANIFEST_PATH"]
+env = { CODEX_HOME = "$OPENAI_CODEX_HOME", OPENAI_CODEX_MCP_BASE_URL = "$OPENAI_CODEX_MCP_BASE_URL", OPENAI_CODEX_MCP_LOG = "error" }
