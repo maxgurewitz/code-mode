@@ -214,9 +214,25 @@ impl DownstreamManager {
                 .with_context(|| format!("unknown log session: {session_id}"))?
         };
 
-        let mut file = File::open(&session.log_path)
-            .await
-            .with_context(|| format!("failed to open log file: {}", session.log_path.display()))?;
+        let mut file = match File::open(&session.log_path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LogReadResult {
+                    server: session.server.clone(),
+                    session_id: session.session_id.clone(),
+                    log_path: session.log_path.display().to_string(),
+                    offset: 0,
+                    next_offset: 0,
+                    eof: true,
+                    text: String::new(),
+                });
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to open log file: {}", session.log_path.display())
+                });
+            }
+        };
         let file_len = file
             .metadata()
             .await
@@ -264,12 +280,6 @@ impl DownstreamManager {
             .with_context(|| format!("failed to create log directory: {}", server_dir.display()))?;
 
         let log_path = server_dir.join(format!("{session_id}.stderr.log"));
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("failed to create log file: {}", log_path.display()))?;
-
         let session = Arc::new(LogSessionRecord {
             server: server_name.to_string(),
             session_id: session_id.clone(),
@@ -292,17 +302,38 @@ impl DownstreamManager {
         };
 
         tokio::spawn(async move {
-            let Ok(mut file) = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .await
-            else {
-                return;
-            };
+            let mut buffer = [0u8; 8192];
+            let mut file = None;
 
-            let _ = tokio::io::copy(&mut stderr, &mut file).await;
-            let _ = file.flush().await;
+            loop {
+                let read = match stderr.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(_) => return,
+                };
+
+                if file.is_none() {
+                    let Ok(opened) = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                        .await
+                    else {
+                        return;
+                    };
+                    file = Some(opened);
+                }
+
+                if let Some(file) = file.as_mut() {
+                    if file.write_all(&buffer[..read]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+
+            if let Some(file) = file.as_mut() {
+                let _ = file.flush().await;
+            }
         });
     }
 
@@ -347,5 +378,69 @@ fn sanitize_path_component(value: &str) -> String {
         "session".into()
     } else {
         sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DownstreamManager;
+    use crate::mcp::config::ServerEntry;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    fn test_manager(log_root: std::path::PathBuf) -> DownstreamManager {
+        DownstreamManager {
+            configs: HashMap::<String, ServerEntry>::new(),
+            connections: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            log_root,
+            session_counter: AtomicU64::new(0),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_log_session_does_not_create_empty_stderr_file() {
+        let temp = tempdir().expect("tempdir");
+        let manager = test_manager(temp.path().join("logs"));
+
+        let session = manager
+            .create_log_session("hello-world", Some(42))
+            .await
+            .expect("create log session");
+
+        assert!(!session.log_path.exists());
+        assert!(
+            session
+                .log_path
+                .parent()
+                .expect("parent")
+                .ends_with("hello-world")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_log_returns_empty_when_stderr_file_has_not_been_created() {
+        let temp = tempdir().expect("tempdir");
+        let manager = test_manager(temp.path().join("logs"));
+
+        let session = manager
+            .create_log_session("hello-world", None)
+            .await
+            .expect("create log session");
+        let result = manager
+            .read_log(&session.session_id, 128, 8192)
+            .await
+            .expect("read empty log");
+
+        assert_eq!(result.server, "hello-world");
+        assert_eq!(result.session_id, session.session_id);
+        assert_eq!(result.log_path, session.log_path.display().to_string());
+        assert_eq!(result.offset, 0);
+        assert_eq!(result.next_offset, 0);
+        assert!(result.eof);
+        assert!(result.text.is_empty());
+        assert!(!session.log_path.exists());
     }
 }
