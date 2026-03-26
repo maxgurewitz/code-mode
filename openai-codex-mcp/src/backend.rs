@@ -3,7 +3,10 @@ use reqwest::{Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{codex_cli, config::Config};
+use crate::{
+    codex_cli,
+    config::{AuthMode, Config},
+};
 
 const DEFAULT_INSTRUCTIONS: &str =
     "You are a helpful coding assistant. Answer directly and concisely.";
@@ -64,43 +67,34 @@ impl CodexBackend {
 
     pub async fn response(&self, request: CodexResponseRequest) -> Result<CodexExecutionResponse> {
         let payload = build_payload(&self.config, &request)?;
-        let credential = codex_cli::read_required_codex_cli_credential()?;
-        if codex_cli::credential_is_expired(&credential) {
-            return Err(codex_cli::expired_credential_error());
-        }
+        let auth = resolve_auth(&self.config)?;
         match self
-            .perform_response_once(
-                &credential.access,
-                credential.account_id.as_deref(),
-                &payload,
-                request.include_raw_events,
-            )
+            .perform_response_once(&auth, &payload, request.include_raw_events)
             .await
         {
             Ok(response) => Ok(response),
-            Err(BackendRequestError::Unauthorized) => Err(codex_cli::expired_credential_error()),
+            Err(BackendRequestError::Unauthorized) => Err(auth.unauthorized_error()),
             Err(BackendRequestError::Other(error)) => Err(error),
         }
     }
 
     async fn perform_response_once(
         &self,
-        access_token: &str,
-        account_id: Option<&str>,
+        auth: &ResolvedAuth,
         payload: &Value,
         include_raw_events: bool,
     ) -> Result<CodexExecutionResponse, BackendRequestError> {
-        let mut request = self
+        let request = self
             .client
             .post(self.config.responses_url())
-            .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", auth.access_token()),
+            )
             .header(header::ACCEPT, "text/event-stream")
             .header(header::CONTENT_TYPE, "application/json")
-            .header("OpenAI-Beta", "responses=experimental")
             .json(payload);
-        if let Some(account_id) = account_id {
-            request = request.header("ChatGPT-Account-Id", account_id);
-        }
+        let request = auth.decorate_request(request);
 
         let response = request
             .send()
@@ -126,10 +120,84 @@ impl CodexBackend {
     }
 }
 
+pub fn validate_auth_configuration(config: &Config) -> Result<()> {
+    resolve_auth(config).map(|_| ())
+}
+
 #[derive(Debug)]
 enum BackendRequestError {
     Unauthorized,
     Other(anyhow::Error),
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedAuth {
+    OAuth(codex_cli::CodexCredential),
+    ApiToken(String),
+}
+
+impl ResolvedAuth {
+    fn access_token(&self) -> &str {
+        match self {
+            Self::OAuth(credential) => &credential.access,
+            Self::ApiToken(token) => token,
+        }
+    }
+
+    fn account_id(&self) -> Option<&str> {
+        match self {
+            Self::OAuth(credential) => credential.account_id.as_deref(),
+            Self::ApiToken(_) => None,
+        }
+    }
+
+    fn decorate_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            Self::OAuth(_) => {
+                let request = request.header("OpenAI-Beta", "responses=experimental");
+                if let Some(account_id) = self.account_id() {
+                    request.header("ChatGPT-Account-Id", account_id)
+                } else {
+                    request
+                }
+            }
+            Self::ApiToken(_) => request,
+        }
+    }
+
+    fn unauthorized_error(&self) -> anyhow::Error {
+        match self {
+            Self::OAuth(_) => codex_cli::expired_credential_error(),
+            Self::ApiToken(_) => anyhow::anyhow!(
+                "OpenAI Codex API token was rejected. Check OPENAI_CODEX_MCP_API_TOKEN and try again."
+            ),
+        }
+    }
+}
+
+fn resolve_auth(config: &Config) -> Result<ResolvedAuth> {
+    match config.auth_mode {
+        AuthMode::OAuth => {
+            let credential = codex_cli::read_required_codex_cli_credential()?;
+            if codex_cli::credential_is_expired(&credential) {
+                return Err(codex_cli::expired_credential_error());
+            }
+            Ok(ResolvedAuth::OAuth(credential))
+        }
+        AuthMode::ApiToken => {
+            let token = config
+                .api_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "OPENAI_CODEX_MCP_API_TOKEN must be set when auth mode is `api_token`."
+                    )
+                })?;
+            Ok(ResolvedAuth::ApiToken(token.to_owned()))
+        }
+    }
 }
 
 impl From<BackendRequestError> for anyhow::Error {
@@ -155,7 +223,7 @@ fn build_payload(config: &Config, request: &CodexResponseRequest) -> Result<Valu
             request
                 .model
                 .clone()
-                .unwrap_or_else(|| config.model.clone()),
+                .unwrap_or_else(|| config.model_name().to_owned()),
         ),
     );
     payload.insert("input".into(), request.input.clone());
@@ -460,6 +528,25 @@ mod tests {
         );
         assert_eq!(payload["store"], json!(false));
         assert_eq!(payload["stream"], json!(true));
+    }
+
+    #[test]
+    fn payload_uses_api_token_default_model_when_needed() {
+        let mut config = crate::config::Config::default();
+        config.auth_mode = crate::config::AuthMode::ApiToken;
+        let payload = build_payload(
+            &config,
+            &super::CodexResponseRequest {
+                model: None,
+                input: json!("hello"),
+                instructions: None,
+                reasoning_effort: None,
+                include_raw_events: false,
+            },
+        )
+        .expect("payload");
+
+        assert_eq!(payload["model"], json!("gpt-5-mini"));
     }
 
     #[test]

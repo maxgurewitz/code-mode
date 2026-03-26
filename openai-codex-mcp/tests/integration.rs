@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use openai_codex_mcp::{
     backend::{CodexBackend, CodexInferRequest},
-    config::Config,
+    config::{AuthMode, Config},
 };
 use rmcp::{
     RoleClient, ServiceExt,
@@ -71,9 +71,67 @@ async fn backend_reads_codex_cli_credentials_and_calls_backend() -> Result<()> {
         seen[0].headers.get("authorization").map(String::as_str),
         Some(expected.as_str())
     );
+    assert_eq!(seen[0].path, "/codex/responses");
+    assert_eq!(
+        seen[0].headers.get("openai-beta").map(String::as_str),
+        Some("responses=experimental")
+    );
 
     server.await?;
     restore_codex_home(previous);
+    Ok(())
+}
+
+#[tokio::test]
+async fn backend_uses_api_token_when_auth_mode_is_api_token() -> Result<()> {
+    let api_token = "token_fixture_123";
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let requests_for_server = std::sync::Arc::clone(&requests);
+    let api_token_for_server = api_token.to_owned();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let request = read_request(&mut stream).await.expect("request");
+        requests_for_server.lock().await.push(request);
+        write_response(
+            &mut stream,
+            "200 OK",
+            "text/event-stream",
+            &sse_body("Hello from API token auth"),
+        )
+        .await
+        .expect("response");
+    });
+
+    let mut config = Config::default();
+    config.base_url = format!("http://{addr}");
+    config.timeout_ms = 5_000;
+    config.auth_mode = AuthMode::ApiToken;
+    config.api_token = Some(api_token.to_owned());
+
+    let backend = CodexBackend::new(config)?;
+    let result = backend
+        .infer(CodexInferRequest {
+            prompt: "say hi".into(),
+            model: None,
+            instructions: None,
+            reasoning_effort: None,
+        })
+        .await?;
+
+    assert_eq!(result.text, "Hello from API token auth");
+    let seen = requests.lock().await;
+    let expected = format!("Bearer {api_token_for_server}");
+    assert_eq!(
+        seen[0].headers.get("authorization").map(String::as_str),
+        Some(expected.as_str())
+    );
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert!(!seen[0].headers.contains_key("chatgpt-account-id"));
+    assert!(!seen[0].headers.contains_key("openai-beta"));
+
+    server.await?;
     Ok(())
 }
 
@@ -135,6 +193,76 @@ async fn stdio_server_accepts_mcp_tool_calls_with_codex_home() -> Result<()> {
         seen[0].headers.get("authorization").map(String::as_str),
         Some(expected.as_str())
     );
+    assert_eq!(seen[0].path, "/codex/responses");
+    assert_eq!(
+        seen[0].headers.get("openai-beta").map(String::as_str),
+        Some("responses=experimental")
+    );
+
+    drop(client);
+    server.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_server_accepts_mcp_tool_calls_with_api_token_env() -> Result<()> {
+    let api_token = "token_fixture_456";
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let requests_for_server = std::sync::Arc::clone(&requests);
+    let api_token_for_server = api_token.to_owned();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let request = read_request(&mut stream).await.expect("request");
+        requests_for_server.lock().await.push(request);
+        write_response(
+            &mut stream,
+            "200 OK",
+            "text/event-stream",
+            &sse_body("Hello from API token MCP"),
+        )
+        .await
+        .expect("response");
+    });
+
+    let binary = env!("CARGO_BIN_EXE_openai-codex-mcp");
+    let (transport, _stderr) =
+        TokioChildProcess::builder(tokio::process::Command::new(binary).configure(|cmd| {
+            cmd.env("OPENAI_CODEX_MCP_AUTH_MODE", "api_token");
+            cmd.env("OPENAI_CODEX_MCP_API_TOKEN", api_token);
+            cmd.env("OPENAI_CODEX_MCP_BASE_URL", format!("http://{addr}"));
+            cmd.env("OPENAI_CODEX_MCP_LOG", "error");
+        }))
+        .spawn()
+        .context("failed to spawn MCP child process")?;
+
+    let client: RunningService<RoleClient, ()> = ().serve(transport).await?;
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("codex_infer").with_arguments(
+                json!({
+                    "prompt": "Say hello",
+                })
+                .as_object()
+                .expect("tool args object")
+                .clone(),
+            ),
+        )
+        .await?;
+
+    let structured = result.structured_content.context("structured content")?;
+    assert_eq!(structured["text"], json!("Hello from API token MCP"));
+
+    let seen = requests.lock().await;
+    let expected = format!("Bearer {api_token_for_server}");
+    assert_eq!(
+        seen[0].headers.get("authorization").map(String::as_str),
+        Some(expected.as_str())
+    );
+    assert_eq!(seen[0].path, "/v1/responses");
+    assert!(!seen[0].headers.contains_key("chatgpt-account-id"));
+    assert!(!seen[0].headers.contains_key("openai-beta"));
 
     drop(client);
     server.await?;
@@ -153,6 +281,20 @@ async fn binary_errors_when_codex_auth_is_missing() -> Result<()> {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("codex login"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn binary_errors_when_api_token_is_missing_in_api_token_mode() -> Result<()> {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_openai-codex-mcp"))
+        .env("OPENAI_CODEX_MCP_AUTH_MODE", "api_token")
+        .output()
+        .await
+        .context("failed to run server")?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("OPENAI_CODEX_MCP_API_TOKEN"));
     Ok(())
 }
 
@@ -193,6 +335,7 @@ fn restore_codex_home(previous: Option<String>) {
 
 #[derive(Debug, Clone)]
 struct ObservedRequest {
+    path: String,
     headers: HashMap<String, String>,
 }
 
@@ -211,13 +354,22 @@ async fn read_request(stream: &mut TcpStream) -> Result<ObservedRequest> {
 
     let header_end = header_end.context("request headers were incomplete")?;
     let header_text = String::from_utf8(buffer[..header_end].to_vec())?;
+    let request_line = header_text
+        .lines()
+        .next()
+        .context("request line was missing")?;
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .context("request path was missing")?
+        .to_owned();
     let mut headers = HashMap::new();
     for line in header_text.lines().skip(1) {
         if let Some((name, value)) = line.split_once(':') {
             headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
         }
     }
-    Ok(ObservedRequest { headers })
+    Ok(ObservedRequest { path, headers })
 }
 
 async fn write_response(
