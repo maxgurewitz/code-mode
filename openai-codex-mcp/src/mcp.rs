@@ -89,7 +89,7 @@ impl OpenAICodexMcpServer {
                 reasoning_effort: input.reasoning_effort,
             })
             .await
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            .map_err(|error| McpError::internal_error(format_error_chain(&error), None))?;
 
         structured_result(&CodexInferToolOutput {
             text: result.text,
@@ -117,7 +117,7 @@ impl OpenAICodexMcpServer {
                 include_raw_events: input.include_raw_events.unwrap_or(false),
             })
             .await
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            .map_err(|error| McpError::internal_error(format_error_chain(&error), None))?;
 
         structured_result(&CodexResponseToolOutput {
             output_text: result.text,
@@ -145,7 +145,36 @@ impl ServerHandler for OpenAICodexMcpServer {
 }
 
 fn structured_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let json = serde_json::to_value(value)
-        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+    let json = serde_json::to_value(value).map_err(|error| {
+        let error = anyhow::Error::new(error);
+        McpError::internal_error(format_error_chain(&error), None)
+    })?;
     Ok(CallToolResult::structured(json))
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    let mut messages = Vec::new();
+    for cause in error.chain() {
+        let message = cause.to_string();
+        if messages.last() != Some(&message) {
+            messages.push(message);
+        }
+    }
+    messages.join(": ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_error_chain;
+
+    #[test]
+    fn formats_nested_error_causes() {
+        use anyhow::{Context, anyhow};
+
+        let error = Err::<(), _>(anyhow!("root cause"))
+            .context("outer context")
+            .unwrap_err();
+        let message = format_error_chain(&error);
+        assert_eq!(message, "outer context: root cause");
+    }
 }

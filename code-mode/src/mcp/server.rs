@@ -102,7 +102,7 @@ impl CodeModeServer {
                     .downstream
                     .call_tool(server, tool, args)
                     .await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                    .map_err(|e| McpError::internal_error(format_error_chain(&e), None))?;
 
                 return Ok(result);
             }
@@ -173,5 +173,32 @@ impl ServerHandler for CodeModeServer {
                 "Code Mode MCP server. Use `search` to discover available operations \
              and their parameter schemas, then `execute` to run them.",
             )
+    }
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    let mut messages = Vec::new();
+    for cause in error.chain() {
+        let message = cause.to_string();
+        if messages.last() != Some(&message) {
+            messages.push(message);
+        }
+    }
+    messages.join(": ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_error_chain;
+
+    #[test]
+    fn formats_nested_error_causes() {
+        use anyhow::{Context, anyhow};
+
+        let error = Err::<(), _>(anyhow!("root cause"))
+            .context("outer context")
+            .unwrap_err();
+        let message = format_error_chain(&error);
+        assert_eq!(message, "outer context: root cause");
     }
 }
