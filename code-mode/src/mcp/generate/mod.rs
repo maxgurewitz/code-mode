@@ -129,15 +129,83 @@ fn instructions_markdown(server_name: &str, instructions: Option<&str>) -> Optio
 }
 
 fn render_client_ts() -> String {
-    format!(
-        r#"import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
-import {{ StdioClientTransport }} from "@modelcontextprotocol/sdk/client/stdio.js";
+    r#"import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+interface Unrefable {
+  unref?: () => void;
+}
+
+interface TransportProcess extends Unrefable {
+  stdin?: (Unrefable & { end?: () => void }) | null;
+  stdout?: Unrefable | null;
+  stderr?: Unrefable | null;
+  kill?: (signal?: string) => void;
+}
+
+interface InternalTransport {
+  _process?: TransportProcess;
+}
 
 let client: Client | null = null;
 let clientPromise: Promise<Client> | null = null;
+let transport: StdioClientTransport | null = null;
+let closePromise: Promise<void> | null = null;
+let autoCleanupRegistered = false;
 
-async function initializeClient(): Promise<Client> {{
-  const transport = new StdioClientTransport({{
+function safeUnref(handle: Unrefable | null | undefined): void {
+  try {
+    handle?.unref?.();
+  } catch {
+    // Ignore handles that cannot be detached in this runtime.
+  }
+}
+
+function getTransportProcess(currentTransport: StdioClientTransport | null): TransportProcess | null {
+  return ((currentTransport as (StdioClientTransport & InternalTransport) | null)?._process) ?? null;
+}
+
+function unrefTransportHandles(currentTransport: StdioClientTransport): void {
+  const child = getTransportProcess(currentTransport);
+  if (!child) return;
+  safeUnref(child);
+  safeUnref(child.stdin);
+  safeUnref(child.stdout);
+  safeUnref(child.stderr);
+}
+
+function forceCloseTransport(): void {
+  const child = getTransportProcess(transport);
+  if (!child) return;
+  try {
+    child.stdin?.end?.();
+  } catch {
+    // Ignore shutdown errors during process exit.
+  }
+  try {
+    child.kill?.("SIGTERM");
+  } catch {
+    // Ignore shutdown errors during process exit.
+  }
+}
+
+function registerAutoCleanup(): void {
+  if (autoCleanupRegistered) return;
+  autoCleanupRegistered = true;
+
+  process.once("beforeExit", () => {
+    void closeAll();
+  });
+
+  process.once("exit", () => {
+    forceCloseTransport();
+  });
+}
+
+async function initializeClient(): Promise<Client> {
+  registerAutoCleanup();
+
+  const nextTransport = new StdioClientTransport({
     command: "code-mode",
     args: ["mcp", "serve"],
     env: Object.fromEntries(
@@ -145,53 +213,81 @@ async function initializeClient(): Promise<Client> {{
         (entry): entry is [string, string] => entry[1] !== undefined,
       ),
     ),
-  }});
-  const nextClient = new Client({{ name: "code-mode-sdk", version: "1.0.0" }});
-  try {{
-    await nextClient.connect(transport);
+  });
+  transport = nextTransport;
+  const nextClient = new Client({ name: "code-mode-sdk", version: "1.0.0" });
+  try {
+    await nextClient.connect(nextTransport);
+    unrefTransportHandles(nextTransport);
     client = nextClient;
     return nextClient;
-  }} catch (error) {{
+  } catch (error) {
     clientPromise = null;
+    transport = null;
+    try {
+      await nextTransport.close();
+    } catch {
+      // Ignore teardown failures after initialization errors.
+    }
     throw error;
-  }}
-}}
+  }
+}
 
-export async function getClient(): Promise<Client> {{
+export async function getClient(): Promise<Client> {
   if (client) return client;
-  if (!clientPromise) {{
+  if (!clientPromise) {
     clientPromise = initializeClient();
-  }}
+  }
   return clientPromise;
-}}
+}
 
-export async function execute<T = unknown>(params: Record<string, unknown>): Promise<T> {{
+export async function execute<T = unknown>(params: Record<string, unknown>): Promise<T> {
   const c = await getClient();
-  const result = await c.callTool({{ name: "execute", arguments: params }});
-  const structured = (result as {{ structuredContent?: T }}).structuredContent;
+  const result = await c.callTool({ name: "execute", arguments: params });
+  const structured = (result as { structuredContent?: T }).structuredContent;
   if (structured !== undefined) return structured;
-  const text = ((result.content ?? []) as Array<{{ type: string; text?: string }}>)
+  const text = ((result.content ?? []) as Array<{ type: string; text?: string }>)
     .filter((c) => c.type === "text")
     .map((c) => c.text ?? "")
     .join("");
-  try {{ return JSON.parse(text) as T; }} catch {{ return text as T; }}
-}}
+  try { return JSON.parse(text) as T; } catch { return text as T; }
+}
 
-export async function closeAll(): Promise<void> {{
-  try {{
-    await clientPromise;
-  }} catch {{
-    // Ignore initialization failures during teardown.
-  }}
-  const connectedClient = client;
-  client = null;
-  clientPromise = null;
-  if (connectedClient) {{
-    await connectedClient.close();
-  }}
-}}
-"#,
-    )
+export async function closeAll(): Promise<void> {
+  if (closePromise) {
+    await closePromise;
+    return;
+  }
+
+  closePromise = (async () => {
+    let initializedClient: Client | null = null;
+    try {
+      initializedClient = await clientPromise;
+    } catch {
+      // Ignore initialization failures during teardown.
+    }
+
+    const connectedClient = client ?? initializedClient;
+    const connectedTransport = transport;
+    client = null;
+    clientPromise = null;
+    transport = null;
+
+    try {
+      if (connectedClient) {
+        await connectedClient.close();
+      } else if (connectedTransport) {
+        await connectedTransport.close();
+      }
+    } finally {
+      closePromise = null;
+    }
+  })();
+
+  await closePromise;
+}
+"#
+    .to_string()
 }
 
 fn render_tool_file(
@@ -689,17 +785,34 @@ mod tests {
             .get("sdk/client.ts")
             .expect("client file should be rendered");
         assert!(client.contains("let clientPromise: Promise<Client> | null = null;"));
+        assert!(client.contains("let transport: StdioClientTransport | null = null;"));
+        assert!(client.contains("let closePromise: Promise<void> | null = null;"));
+        assert!(client.contains("let autoCleanupRegistered = false;"));
+        assert!(client.contains(
+            "function unrefTransportHandles(currentTransport: StdioClientTransport): void {"
+        ));
+        assert!(client.contains("function forceCloseTransport(): void {"));
+        assert!(client.contains("function registerAutoCleanup(): void {"));
+        assert!(client.contains("process.once(\"beforeExit\", () => {"));
+        assert!(client.contains("process.once(\"exit\", () => {"));
         assert!(client.contains("async function initializeClient(): Promise<Client> {"));
+        assert!(client.contains("registerAutoCleanup();"));
         assert!(client.contains("command: \"code-mode\""));
         assert!(client.contains("if (!clientPromise) {"));
         assert!(client.contains("clientPromise = initializeClient();"));
-        assert!(client.contains("await nextClient.connect(transport);"));
+        assert!(client.contains("transport = nextTransport;"));
+        assert!(client.contains("await nextClient.connect(nextTransport);"));
+        assert!(client.contains("unrefTransportHandles(nextTransport);"));
         assert!(client.contains("client = nextClient;"));
         assert!(client.contains("return clientPromise;"));
         assert!(client.contains("export async function execute<T = unknown>("));
         assert!(client.contains("structuredContent?: T"));
-        assert!(client.contains("await clientPromise;"));
+        assert!(client.contains("if (closePromise) {"));
+        assert!(client.contains("initializedClient = await clientPromise;"));
+        assert!(client.contains("const connectedTransport = transport;"));
         assert!(client.contains("clientPromise = null;"));
+        assert!(client.contains("transport = null;"));
+        assert!(client.contains("await connectedTransport.close();"));
 
         Ok(())
     }
