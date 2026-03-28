@@ -19,7 +19,7 @@ The fixture config uses environment-variable interpolation for both server `args
 - **code-mode.toml** — Test config. Sets `base_dir = ".tmp/.code-mode"` and registers local MCP servers whose `args` and `env` values are interpolated from environment variables.
 - **hello-world-server.mjs** — A small MCP server that provides the `hello-world.echo` tool used by the SDK fixture test.
 - **echo-env-server.mjs** — A small MCP server that echoes environment variables and startup args back. Used to test interpolation plumbing.
-- **test-sdk.ts** / **test-env.ts** / **test-openai-codex.ts** — TypeScript scripts that import the generated SDK and exercise downstream tool calls.
+- **test-sdk.ts** / **test-env.ts** / **test-openai-codex.ts** / **test-openai-inference.ts** — TypeScript scripts that import the generated SDK and exercise downstream tool calls.
 - **package.json** — Dependencies for the fixture MCP servers and test scripts.
 
 ## Running the test scripts
@@ -33,6 +33,7 @@ bun run typecheck
 bun run test-sdk.ts
 bun run test-env.ts
 bun run test-openai-codex.ts
+bun run test-openai-inference.ts
 ```
 
 ## OpenAI Codex fixture env
@@ -44,3 +45,26 @@ export OPENAI_CODEX_MCP_MANIFEST_PATH="$PWD/openai-codex-mcp/Cargo.toml"
 ```
 
 `test-openai-codex.ts` will create a fake `CODEX_HOME` under `.tmp/`, seed `auth.json`, start a fake local Codex backend, and set the remaining env vars before it calls the generated SDK.
+
+## OpenAI inference fixture env
+
+The `openai-inference-mcp` fixture entry uses the direct OpenAI MCP crate. Before generating the SDK, export:
+
+```sh
+export OPENAI_INFERENCE_MCP_MANIFEST_PATH="$PWD/openai-inference-mcp/Cargo.toml"
+```
+
+For a live smoke test, also export one of:
+
+```sh
+export OPENAI_API_KEY="..."
+# or
+export OPENAI_INFERENCE_MCP_API_KEY="..."
+```
+
+Then run:
+
+```sh
+cd code-mode/fixtures
+bun run test-openai-inference.ts
+```

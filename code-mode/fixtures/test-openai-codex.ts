@@ -8,6 +8,23 @@ const repoRoot = path.resolve(fixtureDir, "../..");
 const codexHome = path.join(repoRoot, ".tmp", "openai-codex-home-fixture");
 const manifestPath = path.join(repoRoot, "openai-codex-mcp", "Cargo.toml");
 const accountId = "acct_fixture";
+type CodexInferResult = {
+  text: string;
+  model: string;
+  response_id?: string;
+  finish_reason?: string;
+  usage?: unknown;
+};
+
+type CodexResponseResult = {
+  output_text: string;
+  model: string;
+  response_id?: string;
+  finish_reason?: string;
+  usage?: unknown;
+  raw_events?: unknown[];
+};
+
 const accessToken = makeJwt({
   exp: Math.floor(Date.now() / 1000) + 60 * 60,
   "https://api.openai.com/auth": {
@@ -26,16 +43,16 @@ async function main() {
   const { closeAll, openaiCodex } = await import("../../.tmp/.code-mode/sdk/index.js");
 
   try {
-    const infer = await openaiCodex.codexInfer({
+    const infer = (await openaiCodex.codexInfer({
       prompt: "Say fixture hello",
-    });
+    })) as CodexInferResult;
     if (infer.text !== "Fixture hello") {
       throw new Error(
         `expected codexInfer().text to return "Fixture hello", got ${JSON.stringify(infer)}`
       );
     }
 
-    const response = await openaiCodex.codexResponse({
+    const response = (await openaiCodex.codexResponse({
       input: [
         {
           type: "message",
@@ -44,7 +61,7 @@ async function main() {
         },
       ],
       include_raw_events: true,
-    });
+    })) as CodexResponseResult;
     if (response.output_text !== "Fixture hello") {
       throw new Error(
         `expected codexResponse().output_text to return "Fixture hello", got ${JSON.stringify(
