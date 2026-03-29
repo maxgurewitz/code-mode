@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::error::Error as StdError;
+use std::fmt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{
@@ -7,11 +9,11 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use rmcp::{
     RoleClient, ServiceExt,
-    model::{CallToolRequestParams, CallToolResult},
-    service::{Peer, RunningService},
+    model::{CallToolRequestParams, CallToolResult, ErrorData as McpError},
+    service::{Peer, RunningService, ServiceError},
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
 use serde::Serialize;
@@ -84,6 +86,30 @@ pub struct DownstreamManager {
     sessions: Mutex<HashMap<String, Arc<LogSessionRecord>>>,
     log_root: PathBuf,
     session_counter: AtomicU64,
+}
+
+#[derive(Debug)]
+pub enum DownstreamCallError {
+    Tool(McpError),
+    Other(anyhow::Error),
+}
+
+impl fmt::Display for DownstreamCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tool(error) => f.write_str(error.message.as_ref()),
+            Self::Other(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl StdError for DownstreamCallError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Tool(error) => Some(error),
+            Self::Other(error) => error.source(),
+        }
+    }
 }
 
 impl DownstreamManager {
@@ -164,12 +190,17 @@ impl DownstreamManager {
         server_name: &str,
         tool_name: &str,
         arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<CallToolResult> {
+    ) -> std::result::Result<CallToolResult, DownstreamCallError> {
         if !self.configs.contains_key(server_name) {
-            bail!("unknown downstream server: {server_name}");
+            return Err(DownstreamCallError::Other(anyhow::anyhow!(
+                "unknown downstream server: {server_name}"
+            )));
         }
 
-        let conn = self.get_connection(server_name).await?;
+        let conn = self
+            .get_connection(server_name)
+            .await
+            .map_err(DownstreamCallError::Other)?;
 
         let params = CallToolRequestParams::new(tool_name.to_string()).with_arguments(arguments);
 
@@ -177,7 +208,10 @@ impl DownstreamManager {
             .peer
             .call_tool(params)
             .await
-            .with_context(|| format!("failed to call {server_name}.{tool_name}"))?;
+            .map_err(|error| match error {
+                ServiceError::McpError(error) => DownstreamCallError::Tool(error),
+                other => DownstreamCallError::Other(other.into()),
+            })?;
 
         Ok(self.attach_log_metadata(result, server_name, &conn.session))
     }

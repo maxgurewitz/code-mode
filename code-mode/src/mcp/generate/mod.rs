@@ -147,6 +147,17 @@ interface InternalTransport {
   _process?: TransportProcess;
 }
 
+interface GatewayErrorData {
+  type: "auth_required" | "upstream_error";
+  service: string;
+  server: string;
+  tool: string;
+  reason?: string;
+  message: string;
+  url?: string;
+  retryable?: boolean;
+}
+
 let client: Client | null = null;
 let clientPromise: Promise<Client> | null = null;
 let transport: StdioClientTransport | null = null;
@@ -187,6 +198,33 @@ function forceCloseTransport(): void {
   } catch {
     // Ignore shutdown errors during process exit.
   }
+}
+
+function isGatewayErrorData(value: unknown): value is GatewayErrorData {
+  if (!value || typeof value !== "object") return false;
+
+  const candidate = value as Partial<GatewayErrorData>;
+  if (candidate.type !== "auth_required" && candidate.type !== "upstream_error") {
+    return false;
+  }
+
+  return (
+    typeof candidate.service === "string" &&
+    typeof candidate.server === "string" &&
+    typeof candidate.tool === "string" &&
+    typeof candidate.message === "string"
+  );
+}
+
+function extractGatewayErrorData(error: unknown): GatewayErrorData | null {
+  if (!error || typeof error !== "object") return null;
+  const data = (error as { data?: unknown }).data;
+  return isGatewayErrorData(data) ? data : null;
+}
+
+function emitAuthRequiredAndExit(error: GatewayErrorData): never {
+  process.stderr.write(`${JSON.stringify(error)}\n`);
+  process.exit(77);
 }
 
 function registerAutoCleanup(): void {
@@ -243,14 +281,22 @@ export async function getClient(): Promise<Client> {
 
 export async function execute<T = unknown>(params: Record<string, unknown>): Promise<T> {
   const c = await getClient();
-  const result = await c.callTool({ name: "execute", arguments: params });
-  const structured = (result as { structuredContent?: T }).structuredContent;
-  if (structured !== undefined) return structured;
-  const text = ((result.content ?? []) as Array<{ type: string; text?: string }>)
-    .filter((c) => c.type === "text")
-    .map((c) => c.text ?? "")
-    .join("");
-  try { return JSON.parse(text) as T; } catch { return text as T; }
+  try {
+    const result = await c.callTool({ name: "execute", arguments: params });
+    const structured = (result as { structuredContent?: T }).structuredContent;
+    if (structured !== undefined) return structured;
+    const text = ((result.content ?? []) as Array<{ type: string; text?: string }>)
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("");
+    try { return JSON.parse(text) as T; } catch { return text as T; }
+  } catch (error) {
+    const data = extractGatewayErrorData(error);
+    if (data?.type === "auth_required") {
+      emitAuthRequiredAndExit(data);
+    }
+    throw error;
+  }
 }
 
 export async function closeAll(): Promise<void> {

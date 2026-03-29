@@ -4,11 +4,12 @@ use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::builtin::{self, SYSTEM_SERVER_NAME};
 use super::config::Config;
-use super::downstream::DownstreamManager;
+use super::downstream::{DownstreamCallError, DownstreamManager};
 use super::types::{ExecuteInput, SearchRequest, SearchResultEntry, wrap_execute_schema};
 
 /// The Code Mode MCP server.
@@ -26,6 +27,32 @@ pub struct CodeModeServer {
     tool_router: ToolRouter<CodeModeServer>,
     downstream: Arc<DownstreamManager>,
     registry: Arc<Vec<SearchResultEntry>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayErrorData {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    service: String,
+    server: String,
+    tool: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    retryable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthRequiredPayload {
+    #[serde(rename = "type")]
+    kind: String,
+    service: Option<String>,
+    reason: Option<String>,
+    message: Option<String>,
+    url: Option<String>,
+    retryable: Option<bool>,
 }
 
 #[tool_router]
@@ -102,7 +129,7 @@ impl CodeModeServer {
                     .downstream
                     .call_tool(server, tool, args)
                     .await
-                    .map_err(|e| McpError::internal_error(format_error_chain(&e), None))?;
+                    .map_err(|e| classify_downstream_error(server, tool, e))?;
 
                 return Ok(result);
             }
@@ -112,6 +139,63 @@ impl CodeModeServer {
             format!("unknown operation type: {type_str}"),
             None,
         ))
+    }
+}
+
+fn classify_downstream_error(server: &str, tool: &str, error: DownstreamCallError) -> McpError {
+    match error {
+        DownstreamCallError::Tool(error) => {
+            if let Some(payload) = parse_auth_required_payload(error.data.as_ref()) {
+                let message = payload.message.unwrap_or_else(|| error.message.to_string());
+                let data = GatewayErrorData {
+                    kind: "auth_required",
+                    service: payload.service.unwrap_or_else(|| server.to_string()),
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                    reason: payload.reason,
+                    message: message.clone(),
+                    url: payload.url,
+                    retryable: payload.retryable.unwrap_or(true),
+                };
+                return McpError::new(error.code, message, Some(serde_json::json!(data)));
+            }
+
+            let message = error.message.to_string();
+            let data = GatewayErrorData {
+                kind: "upstream_error",
+                service: server.to_string(),
+                server: server.to_string(),
+                tool: tool.to_string(),
+                reason: None,
+                message: message.clone(),
+                url: None,
+                retryable: false,
+            };
+            McpError::new(error.code, message, Some(serde_json::json!(data)))
+        }
+        DownstreamCallError::Other(error) => {
+            let message = format_error_chain(&error);
+            let data = GatewayErrorData {
+                kind: "upstream_error",
+                service: server.to_string(),
+                server: server.to_string(),
+                tool: tool.to_string(),
+                reason: None,
+                message: message.clone(),
+                url: None,
+                retryable: false,
+            };
+            McpError::internal_error(message, Some(serde_json::json!(data)))
+        }
+    }
+}
+
+fn parse_auth_required_payload(data: Option<&serde_json::Value>) -> Option<AuthRequiredPayload> {
+    let payload = serde_json::from_value::<AuthRequiredPayload>(data?.clone()).ok()?;
+    if payload.kind == "auth_required" {
+        Some(payload)
+    } else {
+        None
     }
 }
 
