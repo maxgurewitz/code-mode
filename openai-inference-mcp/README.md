@@ -1,13 +1,13 @@
 # openai-inference-mcp
 
 `openai-inference-mcp` is a small stdio MCP server that forwards raw OpenAI
-inference requests directly to the OpenAI API with an API key.
+inference requests directly to the OpenAI API.
 
 It is intentionally thin:
 
-- API key auth only
+- supports `api_key` auth from `OPENAI_INFERENCE_MCP_API_KEY` or `OPENAI_API_KEY`
+- supports `oauth` auth from `CODEX_HOME/auth.json` or `~/.codex/auth.json`
 - direct `https://api.openai.com` calls by default
-- no OAuth
 - no Codex backend
 - no gateway-specific translation layer
 
@@ -33,9 +33,12 @@ variables.
 base_url = "https://api.openai.com"
 timeout_ms = 120000
 user_agent = "openai-inference-mcp/0.1.0"
+auth_mode = "api_key"
 api_key = "..."
 log = "error"
 ```
+
+`auth_mode` can also be overridden with `--auth-mode oauth` or `--auth-mode api_key`.
 
 If `api_key` is not set in config or `OPENAI_INFERENCE_MCP_API_KEY`, the server
 falls back to `OPENAI_API_KEY`.
@@ -47,6 +50,19 @@ export OPENAI_API_KEY=your_key_here
 openai-inference-mcp
 ```
 
+Or, if Codex CLI is already logged in:
+
+```bash
+openai-inference-mcp --auth-mode oauth
+```
+
+If OAuth credentials are missing or expired, the server exits with an error
+telling you to run:
+
+```bash
+codex login
+```
+
 ## code-mode registration
 
 ```toml
@@ -56,3 +72,11 @@ command = "openai-inference-mcp"
 env = { OPENAI_INFERENCE_MCP_LOG = "error", OPENAI_INFERENCE_MCP_API_KEY = "$OPENAI_API_KEY" }
 ```
 
+Or configure OAuth explicitly:
+
+```toml
+[servers.openai-inference]
+transport = "stdio"
+command = "openai-inference-mcp"
+env = { OPENAI_INFERENCE_MCP_LOG = "error", OPENAI_INFERENCE_MCP_AUTH_MODE = "oauth" }
+```

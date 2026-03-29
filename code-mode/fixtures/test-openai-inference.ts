@@ -16,9 +16,11 @@ type ResponsesCreateResult = {
 };
 
 async function main() {
-  if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_INFERENCE_MCP_API_KEY) {
+  const authMode = process.env.OPENAI_INFERENCE_MCP_AUTH_MODE?.toLowerCase();
+  const usesOauth = authMode === "oauth";
+  if (!usesOauth && !process.env.OPENAI_API_KEY && !process.env.OPENAI_INFERENCE_MCP_API_KEY) {
     throw new Error(
-      "set OPENAI_API_KEY or OPENAI_INFERENCE_MCP_API_KEY before running this fixture"
+      "set OPENAI_API_KEY, OPENAI_INFERENCE_MCP_API_KEY, or OPENAI_INFERENCE_MCP_AUTH_MODE=oauth before running this fixture"
     );
   }
 

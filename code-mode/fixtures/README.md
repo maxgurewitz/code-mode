@@ -60,6 +60,8 @@ For a live smoke test, also export one of:
 export OPENAI_API_KEY="..."
 # or
 export OPENAI_INFERENCE_MCP_API_KEY="..."
+# or, if `codex login` has already created OAuth credentials
+export OPENAI_INFERENCE_MCP_AUTH_MODE="oauth"
 ```
 
 Then run:
