@@ -1,3 +1,13 @@
 [workspace]
 members = ["code-mode", "openai-codex-mcp", "openai-inference-mcp"]
 resolver = "2"
+
+[workspace.package]
+homepage = "https://github.com/maxgurewitz/code-mode"
+license = "MIT"
+repository = "https://github.com/maxgurewitz/code-mode"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
